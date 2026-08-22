@@ -1,0 +1,81 @@
+name: assets
+
+# Rebuilds the client's `gui` tree and pushes it to `unicum-gg/wot.assets`, one
+# branch per client build.
+#
+# **That mirror accumulates.** Wargaming pulls an event's art when the event
+# ends and no later client returns it, so the run writes over its branch without
+# clearing: what the live client has is refreshed, what it dropped is kept
+# (~23k retired event assets: St Patrick, Grinch, off-season Frontline).
+on:
+  schedule:
+    - cron: "30 5 * * *" # daily, just after the sources build
+  workflow_dispatch:
+
+concurrency:
+  group: assets
+  cancel-in-progress: false
+
+env:
+  TARGET: unicum-gg/wot.assets
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - branch: WG
+            host: wgus-woteu.wargaming.net
+            guid: WOT.EU.PRODUCTION
+          - branch: WG_CT
+            host: wgus-wotct.wargaming.net
+            guid: WOT.CT.PRODUCTION
+          - branch: Lesta
+            host: lstus-ru.lesta.ru
+            guid: MT.RU.PRODUCTION
+          - branch: Lesta_PT
+            host: lstus-ru.lesta.ru
+            guid: MT.PT.PRODUCTION
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Checkout the target branch
+        run: |
+          git config --global user.name "wot.build"
+          git config --global user.email "actions@users.noreply.github.com"
+          git clone --depth 1 --branch "${{ matrix.branch }}" \
+            "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
+
+      - name: Generate (no-op if the client version is unchanged)
+        run: npm run assets -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out
+
+      - name: Commit & push if changed
+        working-directory: out
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes for ${{ matrix.branch }}"
+            exit 0
+          fi
+          git commit -m "🍱 update ${{ matrix.branch }} assets to $(cat .version_name)"
+          git push origin "HEAD:${{ matrix.branch }}"

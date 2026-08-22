@@ -1,0 +1,143 @@
+name: sources
+
+# Rebuilds the decompiled client sources and pushes them to the branches of
+# `unicum-gg/wot-src`, one per client build.
+#
+# Needs `SYNC_PAT` (fine-grained PAT, Contents: write on the target repos): the
+# org disables write for GITHUB_TOKEN, and the target is a different repo from
+# the one this workflow lives in.
+on:
+  schedule:
+    - cron: "0 5 * * *" # daily, after the upstream push window
+  workflow_dispatch:
+
+concurrency:
+  group: sources
+  cancel-in-progress: false
+
+env:
+  # Pinned on purpose. A newer uncompyle6 mangles nested dict comprehensions,
+  # and ffdec past 14.4.0 reorders SWF metadata and rewrites boolean coercions,
+  # so either one would make our output drift from upstream's.
+  UNCOMPYLE6_VERSION: "3.8.0"
+  FFDEC_VERSION: "14.4.0"
+  TARGET: unicum-gg/wot-src
+
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # each job pulls several GB, keep them sequential
+      matrix:
+        include:
+          - branch: EU
+            host: wgus-woteu.wargaming.net
+            guid: WOT.EU.PRODUCTION
+          - branch: NA
+            host: wgus-wotna.wargaming.net
+            guid: WOT.NA.PRODUCTION
+          - branch: ASIA
+            host: wgus-wotasia.wargaming.net
+            guid: WOT.ASIA.PRODUCTION
+          - branch: CT
+            host: wgus-wotct.wargaming.net
+            guid: WOT.CT.PRODUCTION
+          # Мир танков, published by Lesta on its own service since Wargaming
+          # left Russia. Same protocol, different host and app tag.
+          - branch: RU
+            host: lstus-ru.lesta.ru
+            guid: MT.RU.PRODUCTION
+          - branch: PT_RU
+            host: lstus-ru.lesta.ru
+            guid: MT.PT.PRODUCTION
+          # 坦克世界, operated in China by 360, on its own service and CDN.
+          - branch: CN
+            host: wgus-cn360.wggames.cn
+            guid: WOT.CN.PRODUCTION
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # xdelta3 and rdiff decode the two delta formats the incremental patches
+      # ship their packages as (`.xdiff` is VCDIFF, `.rdiff` is librsync, whose
+      # decoder is packaged as `rdiff`; `librsync-bin` installs no binary).
+      - name: Install extraction tools
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full xdelta3 rdiff
+
+      # A package is held on disk three times at its widest (the archive, the
+      # patched copy, the unpacked contents), and the largest are several GB.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # uncompyle6 3.8.0 does not run on a modern interpreter, and the patch
+      # level matters too: its `xdis` dependency keys opcode tables by exact
+      # version. 3.9.16 is the newest release xdis 6.0.5 has a table for that
+      # the runner image still ships.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9.16"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install decompilers
+        run: |
+          python -m pip install --quiet "uncompyle6==${UNCOMPYLE6_VERSION}" polib
+          mkdir -p tools/ffdec
+          curl -sL "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version${FFDEC_VERSION}/ffdec_${FFDEC_VERSION}.zip" -o /tmp/ffdec.zip
+          unzip -q /tmp/ffdec.zip -d tools/ffdec
+
+      # Fail in seconds rather than after half an hour of extraction if the
+      # interpreter and the decompiler disagree.
+      - name: Check the decompiler runs
+        run: |
+          python - <<'SMOKE'
+          import sys
+          from uncompyle6.main import decompile_file  # noqa: F401
+          from uncompyle6.scanner import get_scanner
+          scanner = get_scanner("2.7")
+          print("uncompyle6 on %s reads %d 2.7 opcodes" % (sys.version.split()[0], len(scanner.opc.opname)))
+          SMOKE
+
+      - name: Checkout the target branch
+        run: |
+          git config --global user.name "wot.build"
+          git config --global user.email "actions@users.noreply.github.com"
+          if git ls-remote --exit-code --heads "https://github.com/${TARGET}.git" "${{ matrix.branch }}" >/dev/null; then
+            git clone --depth 1 --branch "${{ matrix.branch }}" \
+              "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
+          else
+            git clone --depth 1 "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
+            git -C out checkout --orphan "${{ matrix.branch }}"
+            git -C out rm -rq --cached . || true
+          fi
+
+      - name: Generate (no-op if the client version is unchanged)
+        env:
+          WOTSRC_PYTHON: python
+          WOTSRC_FFDEC_JAR: tools/ffdec/ffdec.jar
+        run: npm run sources -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out
+
+      - name: Commit & push if changed
+        working-directory: out
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes for ${{ matrix.branch }}"
+            exit 0
+          fi
+          git commit -m "🍱 update ${{ matrix.branch }} sources to $(cat .version_name)"
+          git push origin "HEAD:${{ matrix.branch }}"
