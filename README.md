@@ -6,7 +6,7 @@ in three content repositories, one branch per client build.
 
 | Mirror | What it publishes | Branches |
 | --- | --- | --- |
-| [`wot-src`](https://github.com/unicum-gg/wot-src) | decompiled client sources | EU, NA, ASIA, CT, RU, PT_RU, CN |
+| [`wot.src`](https://github.com/unicum-gg/wot.src) | decompiled client sources | EU, NA, ASIA, CT, RU, PT_RU, CN |
 | [`wot.assets`](https://github.com/unicum-gg/wot.assets) | the client's `gui` tree | WG, WG_CT, Lesta, Lesta_PT |
 | [`wot.maps`](https://github.com/unicum-gg/wot.maps) | HD battle minimaps | WG, WG_CT, Lesta, Lesta_PT |
 

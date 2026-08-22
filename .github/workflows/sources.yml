@@ -1,7 +1,7 @@
 name: sources
 
 # Rebuilds the decompiled client sources and pushes them to the branches of
-# `unicum-gg/wot-src`, one per client build.
+# `unicum-gg/wot.src`, one per client build.
 #
 # Needs `SYNC_PAT` (fine-grained PAT, Contents: write on the target repos): the
 # org disables write for GITHUB_TOKEN, and the target is a different repo from
@@ -21,7 +21,7 @@ env:
   # so either one would make our output drift from upstream's.
   UNCOMPYLE6_VERSION: "3.8.0"
   FFDEC_VERSION: "14.4.0"
-  TARGET: unicum-gg/wot-src
+  TARGET: unicum-gg/wot.src
 
 jobs:
   sources:

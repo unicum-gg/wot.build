@@ -88,7 +88,7 @@ export async function resolveClient(host: string, guid: string): Promise<Client 
       game_id: appId,
       protocol_version: PROTOCOL_VERSION,
       metadata_protocol_version: PROTOCOL_VERSION,
-      installation_id: "wot-src",
+      installation_id: "wot.build",
       client_type: "hd",
       lang,
       metadata_version: version,
@@ -101,7 +101,7 @@ export async function resolveClient(host: string, guid: string): Promise<Client 
       const next = new URL(moved.trim()).host;
       if (next && next !== currentHost) {
         if (hop >= MAX_REDIRECTS) throw new Error(`WGUS redirect loop for ${guid}`);
-        console.log(`[wot-src] ${guid} moved: ${currentHost} -> ${next}`);
+        console.log(`[wgus] ${guid} moved: ${currentHost} -> ${next}`);
         currentHost = next;
         continue;
       }

@@ -1,4 +1,4 @@
-// Generator for the `unicum-gg/wot-src` mirror: rebuilds the decompiled World of
+// Generator for the `unicum-gg/wot.src` mirror: rebuilds the decompiled World of
 // Tanks client sources straight from Wargaming's update CDN, with no game
 // client installed, and writes the same tree IzeBerg/wot-src publishes.
 //
@@ -79,7 +79,7 @@ const isLooseSource = (name: string) =>
 // running client, and published alongside the sources they annotate.
 const STUBS = path.resolve("stubs");
 
-const log = (msg: string) => console.log(`[wot-src] ${msg}`);
+const log = (msg: string) => console.log(`[wot.src] ${msg}`);
 
 const { pycRoot, moRoot, harvest } = createHarvester({
   workDir: fs.mkdtempSync(path.join(os.tmpdir(), "wotsrc-")),
