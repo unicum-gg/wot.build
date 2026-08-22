@@ -29,12 +29,12 @@ different.
 
 ## The generators
 
-- `generate-sources.ts` — `.pyc` decompiled, packed XML converted to text, `.swc`
+- `generate-sources.ts`: `.pyc` decompiled, packed XML converted to text, `.swc`
   decompiled to ActionScript, gettext `.mo` to `.po`
-- `generate-assets.ts` — the `gui` tree, **accumulating**: it writes over its
+- `generate-assets.ts`: the `gui` tree, **accumulating**: it writes over its
   branch without clearing, because Wargaming pulls an event's art when the event
   ends and no later client returns it
-- `generate-maps.ts` — `spaces/<id>/mmap.dds` decoded from DXT to webp, plus the
+- `generate-maps.ts`: `spaces/<id>/mmap.dds` decoded from DXT to webp, plus the
   minimap markers cut out of the client's battle atlas
 
 The sources mirror does the opposite of the assets one and **empties its
