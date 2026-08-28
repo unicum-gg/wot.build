@@ -9,6 +9,14 @@ on:
   schedule:
     - cron: "0 6 * * *" # daily, after sources and assets
   workflow_dispatch:
+    inputs:
+      force:
+        # The version guard skips a run whose client is already mirrored, which
+        # is right for a schedule and wrong right after this generator changes:
+        # the output would differ but the version does not.
+        description: "Re-extract even when the client version is unchanged"
+        type: boolean
+        default: false
 
 concurrency:
   group: maps
@@ -65,7 +73,7 @@ jobs:
             "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
 
       - name: Generate (no-op if the client version is unchanged)
-        run: npm run maps -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out --all
+        run: npm run maps -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out --all ${{ inputs.force && '--force' || '' }}
 
       - name: Commit & push if changed
         working-directory: out
