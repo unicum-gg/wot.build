@@ -3,8 +3,10 @@
 //
 // A minimap is a DXT surface at `spaces/<id>/mmap.dds` inside that map's own
 // package, so one map costs one range-downloaded block rather than the whole
-// multi-gigabyte part. The Onslaught night variants live beside it as
-// `mmap_comp7.dds`, which is why some ids yield two files.
+// multi-gigabyte part. Variants live beside it under the same `mmap` prefix and
+// publish as `<id><variant>.webp`, which is why some ids yield several files:
+// the Onslaught night play area (`mmap_comp7.dds`), and on the maps with random
+// events one layer per event, both the area it strikes and the ground it leaves.
 //
 // It also cuts the minimap markers (bases, spawns, control points) out of the
 // client's battle atlas, taken from the sibling `wot.assets` mirror since that
@@ -67,17 +69,49 @@ function mapPackages(archive: SparseArchive): Map<string, Block> {
   return out;
 }
 
+/**
+ * Every minimap a map package ships, as inner paths.
+ *
+ * They are listed off the package rather than named here, so a variant a patch
+ * adds is mirrored by the next run instead of by the next code change. That is
+ * how the random-event layers arrived: the maps already carried them, and only
+ * the two hardcoded names kept them out.
+ */
+function innerMinimaps(pkg: string, id: string): string[] {
+  const listing = execFileSync("7z", ["l", "-slt", pkg], {
+    encoding: "utf8",
+    maxBuffer: 128 << 20,
+  });
+  const wanted = new RegExp(`^spaces/${id}/mmap[^/]*\\.dds$`);
+  const found: string[] = [];
+  for (const entry of listing.split(/\r?\n\r?\n/)) {
+    const name = (entry.match(/^Path = (.+)$/m) ?? [])[1]?.replace(/\\/g, "/");
+    if (name && wanted.test(name)) found.push(name);
+  }
+  return found.sort();
+}
+
 async function extractMap(archive: SparseArchive, block: Block, id: string): Promise<void> {
   const work = path.join(archive.dir, "pkg");
   fs.rmSync(work, { recursive: true, force: true });
   const pkg = await archive.extract(block, work);
   const mapsDir = path.join(OUT, "maps");
   fs.mkdirSync(mapsDir, { recursive: true });
-  await ddsInnerToWebp(archive.dir, pkg, `spaces/${id}/mmap.dds`,
-    path.join(mapsDir, `${id}.webp`), true, SIZE);
-  // Onslaught reuses a handful of maps at night; absent for every other id.
-  await ddsInnerToWebp(archive.dir, pkg, `spaces/${id}/mmap_comp7.dds`,
-    path.join(mapsDir, `${id}_comp7.webp`), false, SIZE);
+  const inners = innerMinimaps(pkg, id);
+  if (!inners.includes(`spaces/${id}/mmap.dds`)) throw new Error(`no minimap in ${id}`);
+  for (const inner of inners) {
+    const variant = inner.slice(`spaces/${id}/mmap`.length, -".dds".length);
+    try {
+      await ddsInnerToWebp(archive.dir, pkg, inner,
+        path.join(mapsDir, `${id}${variant}.webp`), variant === "", SIZE);
+    } catch (error) {
+      // The standard minimap is the map; a variant is a bonus, so one the
+      // decoder cannot read is reported and skipped rather than costing the map
+      // its own mirror entry.
+      if (variant === "") throw error;
+      log(`  ~ ${id}${variant}: ${(error as Error).message}`);
+    }
+  }
 }
 function markerSprites(): Record<string, string> {
   const out: Record<string, string> = {

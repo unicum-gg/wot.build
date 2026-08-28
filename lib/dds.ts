@@ -1,7 +1,7 @@
 // DXT (DDS) decoding, the format the client stores its minimaps and UI atlases
 // in. Kept apart from the generators because two of them need it: the minimaps
-// are DXT1/DXT5 surfaces, and so is the battle atlas the map markers are cut
-// from.
+// are DXT1/DXT3/DXT5 surfaces, and so is the battle atlas the map markers are
+// cut from.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -10,28 +10,38 @@ import sharp from "sharp";
 export type Decoded = { width: number; height: number; rgba: Buffer };
 type Rgb = [number, number, number];
 
-// DXT1 and DXT5 both encode colour as two RGB565 endpoints plus a 2-bit
-// per-pixel selector; DXT5 adds an 8-bit alpha block ahead of it.
+// Every DXT flavour encodes colour as two RGB565 endpoints plus a 2-bit
+// per-pixel selector. The alpha'd ones add a block ahead of it: DXT3 stores four
+// bits per pixel verbatim, DXT5 interpolates between two endpoints.
 function unpack565(v: number): Rgb {
   const r = (v >> 11) & 0x1f, g = (v >> 5) & 0x3f, b = v & 0x1f;
   return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)];
 }
 
-// Decode a DXT1 or DXT5 DDS to RGBA. Minimaps are DXT1; DXT5 is handled too so
-// the odd map with an alpha'd minimap still works.
+// Decode a DXT1, DXT3 or DXT5 DDS to RGBA. A standard minimap is DXT1; the
+// layers a map draws over it are alpha'd, in either of the two forms.
 export function decodeDDS(buf: Buffer): Decoded {
   if (buf.toString("ascii", 0, 4) !== "DDS ") throw new Error("not dds");
   const height = buf.readUInt32LE(12);
   const width = buf.readUInt32LE(16);
   const fourcc = buf.toString("ascii", 84, 88);
+  const dxt3 = fourcc === "DXT3";
   const dxt5 = fourcc === "DXT5";
-  if (fourcc !== "DXT1" && !dxt5) throw new Error(`unsupported ${fourcc}`);
+  if (fourcc !== "DXT1" && !dxt3 && !dxt5) throw new Error(`unsupported ${fourcc}`);
   const rgba = Buffer.alloc(width * height * 4);
   let o = 128;
   for (let by = 0; by < height; by += 4) {
     for (let bx = 0; bx < width; bx += 4) {
       let alphaAt: ((i: number) => number) | null = null;
-      if (dxt5) {
+      if (dxt3) {
+        // Sixteen explicit 4-bit alphas, low nibble first; 17 scales them to the
+        // full 0-255 range (15 * 17 = 255).
+        const lo = buf.readUInt32LE(o);
+        const hi = buf.readUInt32LE(o + 4);
+        alphaAt = (i) =>
+          ((i < 8 ? lo >>> (4 * i) : hi >>> (4 * (i - 8))) & 15) * 17;
+        o += 8;
+      } else if (dxt5) {
         const a0 = buf[o], a1 = buf[o + 1];
         const at = [a0, a1, 0, 0, 0, 0, 0, 0];
         if (a0 > a1) for (let i = 1; i < 7; i++) at[i + 1] = ((7 - i) * a0 + i * a1) / 7;
@@ -50,7 +60,9 @@ export function decodeDDS(buf: Buffer): Decoded {
       o += 8;
       const p0 = unpack565(c0), p1 = unpack565(c1);
       const pal: Rgb[] = [p0, p1, [0, 0, 0], [0, 0, 0]];
-      if (dxt5 || c0 > c1) {
+      // The alpha'd formats always use the four-colour palette; plain DXT1
+      // switches to the three-colour one when its endpoints are ordered.
+      if (alphaAt || c0 > c1) {
         pal[2] = [(2 * p0[0] + p1[0]) / 3, (2 * p0[1] + p1[1]) / 3, (2 * p0[2] + p1[2]) / 3];
         pal[3] = [(p0[0] + 2 * p1[0]) / 3, (p0[1] + 2 * p1[1]) / 3, (p0[2] + 2 * p1[2]) / 3];
       } else {
@@ -72,10 +84,9 @@ export function decodeDDS(buf: Buffer): Decoded {
   return { width, height, rgba };
 }
 
-// ---- Per-map extraction ------------------------------------------------------
 // Decode one inner `.dds` from an already-unpacked map `.pkg` and write it as a
-// WebP. `required` maps get the standard top-down minimap; the Onslaught variant
-// (`mmap_comp7.dds`, a reduced play area shipped only by some maps) is optional.
+// WebP. Only the standard top-down minimap is `required`; the variants beside it
+// are whatever that map happens to ship.
 export async function ddsInnerToWebp(
   dir: string,
   pkgPath: string,
