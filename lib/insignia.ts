@@ -12,16 +12,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { decodePacked, type PackedNode } from "./packed.js";
+import { child, text } from "./read.js";
 
 const HIGHEST_MARK = 3;
 
-function child(node: PackedNode | undefined, name: string): PackedNode | undefined {
-  return node?.children.find((c) => c.name === name);
-}
 
-function text(node: PackedNode | undefined): string {
-  return typeof node?.value === "string" ? node.value.trim() : "";
-}
 
 /**
  * The three files a mark is shipped in, from the one the data names.

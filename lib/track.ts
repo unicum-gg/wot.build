@@ -11,6 +11,7 @@
 // in order around the loop, each holding a four-by-four matrix whose translation
 // is all we need.
 import { decodePacked, isPacked, type PackedNode } from "./packed.js";
+import { child } from "./read.js";
 
 /** Where a vehicle keeps its track path and the link laid along it. */
 export const TRACK_GLOB = "vehicles/*/*/track/*";
@@ -20,9 +21,6 @@ export type TrackPath = {
   points: number[][];
 };
 
-function child(node: PackedNode, name: string): PackedNode | undefined {
-  return node.children.find((c) => c.name === name);
-}
 
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];

@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { decodePacked, type PackedNode } from "./packed.js";
+import { child, text, words } from "./read.js";
 
 /** One of the four colours a pattern's channels select between. */
 export type CamouflageColor = { r: number; g: number; b: number; a: number };
@@ -88,13 +89,7 @@ export type FilterClause = {
   levels: number[];
 };
 
-function child(node: PackedNode | undefined, name: string): PackedNode | undefined {
-  return node?.children.find((c) => c.name === name);
-}
 
-function text(node: PackedNode | undefined): string {
-  return typeof node?.value === "string" ? node.value.trim() : "";
-}
 
 /** The client writes vectors as text, and drops to a real array for some. */
 function numbers(node: PackedNode | undefined): number[] {
@@ -107,9 +102,6 @@ function numbers(node: PackedNode | undefined): number[] {
     .filter((n) => Number.isFinite(n));
 }
 
-function words(node: PackedNode | undefined): string[] {
-  return text(node).split(/\s+/).filter(Boolean);
-}
 
 /** One value per palette colour, filled out from the client's own default. */
 function four(values: number[], fallback: number): [number, number, number, number] {
