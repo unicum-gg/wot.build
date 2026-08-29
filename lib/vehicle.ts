@@ -13,301 +13,42 @@ import { blocks, readIndices, readUvStream, readVertices, type VertexData } from
 import { hugWheels, mirrorPath, type BeltWheel } from "./track.js";
 import { writeGlb, type GltfBone, type GltfMesh } from "./gltf.js";
 import { mirrorPoint, mirrorPositions, reverseWinding } from "./handedness.js";
-import { type ChassisWheel, type CustomizationSlot, type PieceCamouflage } from "./script.js";
+import type { ChassisWheel } from "./chassis.js";
+import type { CustomizationSlot } from "./slots.js";
+import type { PieceCamouflage } from "./script.js";
+import {
+  ALPHA_SCALE,
+  CAMOUFLAGE_MASK_PROPERTY,
+  camouflageMaskPath,
+  ColorSpace,
+  EXCLUDE_AND_AO_PROPERTY,
+  SRGB_PROPERTIES,
+  texturePath,
+  type Material,
+} from "./material.js";
+import { MirrorFeature, type Piece, type Tracks, type VehicleModel } from "./model.js";
 import { hardpoints, place, placements, readVisual, type Placement, type VisualMaterial, type VisualRenderSet } from "./visual.js";
+import { determinant, skeletonOf, unit, wheelsOf, type Wheel } from "./wheels.js";
 
-/** Texture extension the mirror publishes, replacing the client's `.dds`. */
-export const TEXTURE_EXTENSION = ".webp";
 
-/** Whether a texture holds colour a viewer must decode, or raw numbers. */
-export enum ColorSpace {
-  Srgb = "srgb",
-  Linear = "linear",
-}
 
-export type Material = {
-  name: string;
-  shader: string;
-  /** Shader property name to the texture it samples. */
-  textures: Record<string, { path: string; colorSpace: ColorSpace; hd?: string }>;
-  /** Every shader parameter that is not a texture, by property name. */
-  values: Record<string, boolean | number | number[]>;
-  /** Draw both faces: thin geometry such as a track loses its far side without it. */
-  doubleSided: boolean;
-  /** Cut away alpha below this fraction, or null when the material is opaque. */
-  alphaTest: number | null;
-  /**
-   * Set when this material's look was taken from another on the same vehicle,
-   * naming which. The client leaves a material empty where a piece is painted
-   * like the one it grows out of, a casemate sharing its hull's skin being the
-   * common case, and a viewer drawing the empty one gets a white turret.
-   */
-  inheritedFrom?: string;
-};
 
-// Only the base colour carries colour a viewer has to decode. Everything else
-// holds numbers (directions, roughness, masks) that must be sampled as they are.
-const SRGB_PROPERTIES = new Set(["diffuseMap"]);
 
-// `alphaReference` is a byte threshold, which glTF and three both express as a
-// fraction of full opacity.
-const ALPHA_SCALE = 255;
 
-export type Piece = {
-  /** File name of the geometry, relative to the vehicle's folder. */
-  glb: string;
-  /** Attachment points, by name, as a translation in the vehicle's space. */
-  hardpoints: Record<string, number[]>;
-  /**
-   * One entry per mesh in the `.glb`, in the same order, listing the material
-   * each of its primitives draws with. A mesh has more than one when the client
-   * shades parts of the same geometry differently.
-   */
-  meshes: { name: string; materials: number[] }[];
-};
 
-/**
- * How a vehicle's tracks are drawn.
- *
- * The game lays copies of one link along a closed path around the road wheels
- * and slides them as the vehicle moves, rather than drawing the fixed ribbon
- * that also ships. `segment` names the piece holding that link.
- */
-export type Tracks = {
-  segment: string;
-  /** Closed paths in the vehicle's space, by side, in metres. */
-  paths: Record<string, number[][]>;
-};
 
-/**
- * What this build of the mirror packs, for a viewer that may be older than it.
- *
- * A texture's meaning can change between builds without its name changing, and
- * a viewer cannot tell by looking: a normal map whose blue channel is a mask
- * and one whose blue channel is zero are the same file to a loader. So the
- * model says, and a viewer that does not recognise a name simply ignores it.
- */
-export enum MirrorFeature {
-  /** The normal map's blue carries the client's alpha mask, not a filler. */
-  NormalMask = "normal-mask",
-}
 
-export type VehicleModel = {
-  /** Everything this build packs that a viewer has to be told about. */
-  features: MirrorFeature[];
-  /**
-   * How high the chassis carries the hull, in the vehicle's own space.
-   *
-   * Every piece but the chassis hangs off this, the hull directly and the turret
-   * and gun through it. It comes from the vehicle's script rather than from any
-   * mesh, and without it a hull sits buried in its own tracks.
-   *
-   * Absent for the handful of vehicles whose geometry outlived their script:
-   * the value is unknowable there, and publishing a zero would quietly claim
-   * the hull sits on the ground.
-   */
-  hullPosition?: number[];
-  pieces: Record<string, Piece>;
-  materials: Material[];
-  /** Absent when the client ships no path for this vehicle. */
-  tracks?: Tracks;
-  /**
-   * The vehicle's 3D styles, by the name the client gives each one.
-   *
-   * A style is a complete set of pieces with textures of its own, published
-   * under `_skins/<name>/` beside the vehicle. It is reached exactly the way the
-   * vehicle is, so a viewer offering them needs no new loading path: only a
-   * different folder.
-   */
-  skins?: string[];
-  /**
-   * Where each piece takes a mark, an emblem or an inscription, by piece.
-   *
-   * The client places these by projection rather than in a texture: a slot
-   * carries a ray and a size, and the surface the ray crosses is what gets
-   * marked. So the marks of excellence wrap a gun barrel and an emblem sits
-   * flat on a sloped plate without either being drawn into a map.
-   */
-  slots?: Record<string, CustomizationSlot[]>;
-  /**
-   * How each piece stretches a camouflage, and what it keeps clear of one.
-   *
-   * The client multiplies the camouflage's own tiling by the piece's, which is
-   * how one pattern reads at the same size across a hull, a turret and a gun
-   * whose textures are packed at very different densities.
-   */
-  camouflage?: Record<string, PieceCamouflage>;
-  /**
-   * How much the vehicle as a whole stretches a camouflage, from its own
-   * script. Only the computed tiling path uses it, and only for the patterns
-   * the client marks `relativeWithFactor`.
-   */
-  camouflageDensity?: number[];
-  /**
-   * The three marks of excellence this vehicle's nation wears, smallest first.
-   *
-   * The same ten sets serve the whole catalogue, so they are published where
-   * the client keeps them and named here rather than copied per vehicle.
-   */
-  marks?: string[];
-  /**
-   * Where the 2D styles live, when the client offers any on this vehicle.
-   *
-   * A separate file rather than a field: it is a long list nothing needs until
-   * a player opens the paint shop, and the manifest is read on every load.
-   */
-  styles?: string;
-  /**
-   * The axle each road wheel turns about, in the chassis's own space.
-   *
-   * The bone a wheel is skinned to sits at the origin and says nothing about
-   * where its wheel is, so a viewer that turns the bone on its own swings the
-   * wheel around the middle of the tank. These are read from the wheels
-   * themselves, so they are in the same space as the positions we write.
-   */
-  wheels?: Wheel[];
-};
 
-export type Wheel = {
-  /** The bone to turn, as the skin names it. */
-  bone: string;
-  /** Where its axle sits, so the turn happens about the right point. */
-  axle: number[];
-  /**
-   * How far the rim stands from that axle, so a turn can match a distance.
-   *
-   * The chassis script's own figure where it gives one. Measuring the mesh
-   * instead comes out 5% short on every wheel of the IS-7, which is a belt and
-   * a set of wheels running at different speeds.
-   */
-  radius: number;
-  /**
-   * The circle the belt runs on around it, which is not the rim.
-   *
-   * A drive sprocket carries its track in the tooth roots, 51 mm inside the
-   * tips on the IS-7, and an idler stands it off instead. Only the road wheels
-   * have the two the same. Equal to the radius for a vehicle whose script the
-   * client has dropped, which is the best that can be said without one.
-   */
-  wrap: number;
-};
 
-/**
- * A wheel's bones, as the client names them: `W_L0_BlendBone`,
- * `WD_R1_BlendBone`, and on a wheeled vehicle `WD_L0_SCR_BlendBone`.
- *
- * **The `_SCR_` one is not optional.** Where a vehicle steers, the wheel's disc
- * is bound to it and the plain bone beside it carries only the suspension arm.
- * Leaving it out of the pattern threw the disc's vertices away, so the arm alone
- * was measured: the Panhard EBR came out with a radius of 0.29 against a real
- * 0.59 and an axle off the wheel's centre, and its steered wheels swung instead
- * of turning.
- */
-const WHEEL_BONE = /^WD?_[LR]\d+(_SCR)?_BlendBone$/;
 
-/** The plain bone a steering bone sits beside, which holds the arm and not the disc. */
-const steeringSibling = (name: string) => name.replace("_SCR_", "_");
 
-/**
- * Where each of a piece's wheels turns, read from the wheel itself.
- *
- * The node tree does carry a placement beside each wheel bone, but in the
- * bone's own space rather than the mesh's, so using it puts every axle on the
- * wrong side of the tank. The geometry has no such ambiguity: every vertex is
- * bound rigidly to one bone, so a wheel is exactly the cloud of vertices
- * naming it, its axle is that cloud's centre and its radius half the height it
- * spans. Called once the rest pose is baked and the piece mirrored, so what
- * comes out is already in the space the `.glb` positions live in.
- */
-function wheelsOf(set: VisualRenderSet, vertices: VertexData): Wheel[] {
-  const clouds = new Map<number, { min: number[]; max: number[] }>();
-  for (let i = 0; i * 4 < vertices.bones.length; i++) {
-    let bone = -1;
-    let best = 0;
-    for (let k = 0; k < 4; k++) {
-      const weight = vertices.weights[i * 4 + k];
-      if (weight > best) {
-        best = weight;
-        bone = vertices.bones[i * 4 + k];
-      }
-    }
-    if (bone < 0 || !WHEEL_BONE.test(set.bones[bone] ?? "")) continue;
-    let cloud = clouds.get(bone);
-    if (!cloud) clouds.set(bone, (cloud = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] }));
-    for (let axis = 0; axis < 3; axis++) {
-      const value = vertices.positions[i * 3 + axis];
-      if (value < cloud.min[axis]) cloud.min[axis] = value;
-      if (value > cloud.max[axis]) cloud.max[axis] = value;
-    }
-  }
-  const out: Wheel[] = [];
-  for (const [bone, cloud] of clouds) {
-    // A wheel is a disc standing on edge, so the height it spans is its
-    // diameter. Width would be the hub, which says nothing about the turn.
-    const radius = (cloud.max[1] - cloud.min[1]) / 2;
-    out.push({
-      bone: set.bones[bone],
-      axle: cloud.min.map((low, axis) => (low + cloud.max[axis]) / 2),
-      // Both stand in until the script is read, which is where the real figures
-      // are. Measuring a rim comes out about 5% under what the game turns it at.
-      radius,
-      wrap: radius,
-    });
-  }
-  // Where a wheel steers, two bones answer to it and only one carries the disc.
-  // The arm is not a wheel and measuring it says nothing about the turn.
-  const steered = new Set(out.filter((w) => w.bone.includes("_SCR_")).map((w) => steeringSibling(w.bone)));
-  return out.filter((w) => !steered.has(w.bone));
-}
 
-/** The render set's bones, placed in the piece's space, or undefined when it has none. */
-function skeletonOf(set: VisualRenderSet, nodes: Map<string, Placement>): GltfBone[] | undefined {
-  if (set.bones.length === 0) return undefined;
-  const placed = set.bones.map((name) => {
-    const at = nodes.get(name) ?? { basis: [1, 0, 0, 0, 1, 0, 0, 0, 1], offset: [0, 0, 0] };
-    // The skeleton rides in the mirrored space with the vertices it drives.
-    return { name, basis: at.basis, offset: mirrorPoint(at.offset) };
-  });
-  return placed.length > 0 ? placed : undefined;
-}
 
-/** Scale a vector back to unit length, leaving a zero vector alone. */
-function unit(v: number[]): number[] {
-  const length = Math.hypot(v[0], v[1], v[2]);
-  return length > 0 ? [v[0] / length, v[1] / length, v[2] / length] : v;
-}
 
-/** Whether a basis mirrors rather than rotates, which reverses triangle winding. */
-function determinant(b: number[]): number {
-  return (
-    b[0] * (b[4] * b[8] - b[5] * b[7]) -
-    b[1] * (b[3] * b[8] - b[5] * b[6]) +
-    b[2] * (b[3] * b[7] - b[4] * b[6])
-  );
-}
 
-/** The client's own name for the map holding occlusion and the camouflage mask. */
-const EXCLUDE_AND_AO_PROPERTY = "excludeMaskAndAOMap";
 
-/** What the manifest calls the mask once it is published on its own. */
-const CAMOUFLAGE_MASK_PROPERTY = "camouflageMask";
 
-/** Rewrite a client texture path to the one the mirror publishes. */
-export function texturePath(clientPath: string): string {
-  return clientPath.replace(/\.dds$/i, TEXTURE_EXTENSION);
-}
 
-/**
- * Where the camouflage mask that accompanies an occlusion map is published.
- *
- * It is a file of its own rather than a channel of the occlusion, so a viewer
- * that is not painting a camouflage never loads it.
- */
-export function camouflageMaskPath(clientPath: string): string {
-  // `_camo` goes in front of the `_hd`, not after it, so the pair still reads
-  // as one texture and its high-definition twin to everything downstream.
-  return clientPath.replace(/(_hd)?\.dds$/i, (_, hd: string | undefined) => `_camo${hd ?? ""}${TEXTURE_EXTENSION}`);
-}
 
 /**
  * Accumulates a vehicle's pieces, keeping one material list for the whole
