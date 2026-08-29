@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
+import { decodeBc7 } from "./bc7.js";
 
 export type Decoded = { width: number; height: number; rgba: Buffer };
 type Rgb = [number, number, number];
@@ -18,13 +19,56 @@ function unpack565(v: number): Rgb {
   return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)];
 }
 
-// Decode a DXT1, DXT3 or DXT5 DDS to RGBA. A standard minimap is DXT1; the
-// layers a map draws over it are alpha'd, in either of the two forms.
+// A `DX10` file names its real format in a twenty-byte header of its own, which
+// pushes the surface back by that much.
+const DX10_HEADER = 20;
+const DXGI_BC7_UNORM = 98;
+const DXGI_BC7_UNORM_SRGB = 99;
+
+// Decode a DDS to RGBA. A standard minimap is DXT1; the layers a map draws over
+// it are alpha'd, in DXT3 or DXT5, and BC7 is what the client's newest vehicles
+// ship.
 export function decodeDDS(buf: Buffer): Decoded {
   if (buf.toString("ascii", 0, 4) !== "DDS ") throw new Error("not dds");
   const height = buf.readUInt32LE(12);
   const width = buf.readUInt32LE(16);
   const fourcc = buf.toString("ascii", 84, 88);
+
+  if (fourcc === "DX10") {
+    const format = buf.readUInt32LE(128);
+    if (format !== DXGI_BC7_UNORM && format !== DXGI_BC7_UNORM_SRGB) {
+      throw new Error(`unsupported DX10 (dxgiFormat ${format})`);
+    }
+    return { width, height, rgba: decodeBc7(buf, 128 + DX10_HEADER, width, height) };
+  }
+
+  // Not every DDS is compressed. The client keeps a few plain ones, among them
+  // the detail map every tank material asks for, and they announce themselves
+  // by carrying no four-character code at all: the pixel format then describes
+  // the layout with a bit count and one mask per channel. Only the common
+  // 32-bit case is read, which is the only one the client uses.
+  const PLAIN_RGB = 0x40;
+  // Four zero bytes, not four spaces: `"\0\0\0\0".trim()` is not empty in
+  // JavaScript, since NUL is not whitespace, and testing it that way silently
+  // sent every plain file down the compressed path.
+  if (buf.readUInt32LE(84) === 0 && buf.readUInt32LE(80) & PLAIN_RGB) {
+    if (buf.readUInt32LE(88) !== 32) throw new Error(`unsupported plain ${buf.readUInt32LE(88)}-bit`);
+    const shiftOf = (mask: number) => {
+      for (let byte = 0; byte < 4; byte++) if (((mask >>> (byte * 8)) & 0xff) === 0xff) return byte;
+      return -1;
+    };
+    const order = [92, 96, 100, 104].map((at) => shiftOf(buf.readUInt32LE(at)));
+    const rgba = Buffer.alloc(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      for (let c = 0; c < 4; c++) {
+        // A channel the file does not carry is opaque, which is what an absent
+        // alpha mask means and what a missing colour would have to be anyway.
+        rgba[i * 4 + c] = order[c] < 0 ? 255 : buf[128 + i * 4 + order[c]];
+      }
+    }
+    return { width, height, rgba };
+  }
+
   const dxt3 = fourcc === "DXT3";
   const dxt5 = fourcc === "DXT5";
   if (fourcc !== "DXT1" && !dxt3 && !dxt5) throw new Error(`unsupported ${fourcc}`);
