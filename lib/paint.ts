@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { decodePacked, type PackedNode } from "./packed.js";
 import type { CamouflageColor } from "./camouflage.js";
+import { child, children, text } from "./read.js";
 
 /** The client writes vectors as text, and drops to a real array for some. */
 function numbers(node: PackedNode | undefined): number[] {
@@ -19,7 +20,6 @@ function numbers(node: PackedNode | undefined): number[] {
     .map(Number)
     .filter((n) => Number.isFinite(n));
 }
-import { child, children, text } from "./read.js";
 
 /**
  * The four parts of a vehicle a style paints, in the order the client's

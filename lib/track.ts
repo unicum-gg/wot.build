@@ -21,7 +21,6 @@ export type TrackPath = {
   points: number[][];
 };
 
-
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];
   if (Array.isArray(node.value)) return node.value as number[];

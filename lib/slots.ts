@@ -17,7 +17,6 @@ function numbers(node: PackedNode | undefined): number[] {
   return [];
 }
 
-/** What a script says about one vehicle, keyed the way the content tree is. */
 /** What kind of thing a slot takes. The client's own names. */
 export enum SlotKind {
   /** The marks of excellence, on the gun. */

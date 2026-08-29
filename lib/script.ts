@@ -44,9 +44,6 @@ export const CUSTOMIZATION_GLOBS = [
   "scripts/item_defs/customization/*/*.xml",
 ];
 
-
-
-
 /**
  * What a piece says about the camouflage laid on it.
  *
@@ -136,7 +133,6 @@ export type VehicleScript = {
   sets: Record<string, Record<string, string>>;
 };
 
-
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];
   if (Array.isArray(node.value)) return node.value.map(Number);
@@ -183,9 +179,6 @@ function plates(node: PackedNode | undefined): { armor: Record<string, number>; 
   }
   return { armor, spaced };
 }
-
-
-
 
 /** `vehicles/russian/R45_IS-7/normal/lod0/Turret_01.model` split in two. */
 function modelPath(node: PackedNode): { content: string; piece: string } | null {
@@ -279,19 +272,6 @@ function contentPath(node: PackedNode): string | null {
   return null;
 }
 
-/**
- * Every vehicle script under `dir`, keyed by the content path it publishes to.
- *
- * Several scripts share one content path: a vehicle, its clone for a seasonal
- * mode, its training dummy. They describe the same geometry with different
- * loadouts, and a mode's clone often carries only the pieces that mode uses, so
- * they are merged, with the vehicle's own script winning any disagreement. It is
- * recognised by its filename matching the folder its content sits in, which is
- * the only thing that separates it from its clones.
- *
- * A script naming no model at all is skipped: without one there is no way to say
- * which geometry it describes.
- */
 /** What a customization filter needs to know about a vehicle. */
 export type VehicleIdentity = {
   /** The name the scripts use, `ussr`, which is not the content folder's. */
@@ -333,6 +313,19 @@ export function readVehicleIdentity(dir: string, code: string): VehicleIdentity 
   return null;
 }
 
+/**
+ * Every vehicle script under `dir`, keyed by the content path it publishes to.
+ *
+ * Several scripts share one content path: a vehicle, its clone for a seasonal
+ * mode, its training dummy. They describe the same geometry with different
+ * loadouts, and a mode's clone often carries only the pieces that mode uses, so
+ * they are merged, with the vehicle's own script winning any disagreement. It is
+ * recognised by its filename matching the folder its content sits in, which is
+ * the only thing that separates it from its clones.
+ *
+ * A script naming no model at all is skipped: without one there is no way to say
+ * which geometry it describes.
+ */
 export function readVehicleScripts(dir: string): Map<string, VehicleScript> {
   const out = new Map<string, VehicleScript>();
   // Which pieces came from the vehicle's own script rather than from a clone.

@@ -89,8 +89,6 @@ export type FilterClause = {
   levels: number[];
 };
 
-
-
 /** The client writes vectors as text, and drops to a real array for some. */
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];
@@ -101,7 +99,6 @@ function numbers(node: PackedNode | undefined): number[] {
     .map(Number)
     .filter((n) => Number.isFinite(n));
 }
-
 
 /** One value per palette colour, filled out from the client's own default. */
 function four(values: number[], fallback: number): [number, number, number, number] {

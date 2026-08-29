@@ -19,10 +19,6 @@ import { readInsignia } from "./insignia.js";
 import { type VehicleIdentity } from "./script.js";
 import { child, children, text } from "./read.js";
 
-
-
-
-
 export type StyleCamouflage = {
   /** The pattern, as the client paths it. */
   texture: string;
@@ -65,8 +61,6 @@ export type StyleCamouflage = {
   emission: { texture: string; power: number } | null;
   regions: Partial<Record<StylePart, number>>;
 };
-
-
 
 export type StyleOutfit = {
   season: string;
@@ -117,9 +111,6 @@ export type Style2D = {
   outfits: StyleOutfit[];
 };
 
-
-
-
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];
   if (Array.isArray(node.value)) return node.value;
@@ -129,13 +120,6 @@ function numbers(node: PackedNode | undefined): number[] {
     .map(Number)
     .filter((n) => Number.isFinite(n));
 }
-
-
-
-
-
-
-
 
 /** Walk to every `<style>`, wherever a file nests it. */
 function everyStyle(node: PackedNode, into: PackedNode[] = []): PackedNode[] {

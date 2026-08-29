@@ -30,26 +30,6 @@ import { MirrorFeature, type Piece, type Tracks, type VehicleModel } from "./mod
 import { hardpoints, place, placements, readVisual, type Placement, type VisualMaterial, type VisualRenderSet } from "./visual.js";
 import { determinant, skeletonOf, unit, wheelsOf, type Wheel } from "./wheels.js";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /**
  * Accumulates a vehicle's pieces, keeping one material list for the whole
  * vehicle so shared textures are declared once.
@@ -265,6 +245,9 @@ export class VehicleBuilder {
     return writeGlb(meshes);
   }
 
+  /** Name the track link is published under, when the vehicle ships one. */
+  static readonly TRACK_SEGMENT = "TrackSegment";
+
   /**
    * The manifest, keeping only textures that were actually published.
    *
@@ -273,9 +256,6 @@ export class VehicleBuilder {
    * so publishing the reference would send a viewer after a file that is not
    * there. `published` holds the mirror-relative path of every texture written.
    */
-  /** Name the track link is published under, when the vehicle ships one. */
-  static readonly TRACK_SEGMENT = "TrackSegment";
-
   build(published: Set<string>, hullPosition: number[] | null): VehicleModel {
     // The client ships each texture twice, the second at twice the side under a
     // `_hd` name. The pair is published side by side and named here, so a

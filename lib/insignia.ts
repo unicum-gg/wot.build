@@ -16,8 +16,6 @@ import { child, text } from "./read.js";
 
 const HIGHEST_MARK = 3;
 
-
-
 /**
  * The three files a mark is shipped in, from the one the data names.
  *
