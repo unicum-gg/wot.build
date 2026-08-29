@@ -16,6 +16,7 @@
   },
   "include": [
     "generate-*.ts",
-    "lib/**/*.ts"
+    "lib/**/*.ts",
+    "spike/onevehicle.ts"
   ]
 }

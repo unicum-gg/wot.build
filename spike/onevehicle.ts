@@ -11,9 +11,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { mergeShapes, readCollision } from "../lib/collision.js";
-import { readVehicleIdentity, readVehicleScripts, type ChassisWheel } from "../lib/script.js";
+import { readVehicleIdentity, readVehicleScripts } from "../lib/script.js";
+import type { ChassisWheel } from "../lib/chassis.js";
 import { readTrackPath } from "../lib/track.js";
-import { VehicleBuilder, texturePath } from "../lib/vehicle.js";
+import { texturePath } from "../lib/material.js";
+import { VehicleBuilder } from "../lib/vehicle.js";
+import type { VehicleModel } from "../lib/model.js";
 import { convertCamouflage, convertTexture, TextureQuality } from "../lib/texture.js";
 import { readSkinMarks, readStyles, type Style2D } from "../lib/style.js";
 import { nameFor, readCatalogue } from "../lib/localization.js";
