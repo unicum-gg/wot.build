@@ -34,6 +34,7 @@ import {
   convertPieces,
   convertTextures,
   convertTrack,
+  type Measured,
 } from "./lib/models/convert.js";
 import { publish } from "./lib/models/publish.js";
 import { log, readSettings } from "./lib/models/settings.js";
@@ -50,6 +51,8 @@ import {
 
 const settings = readSettings(process.argv.slice(2));
 const vehicles: Catalogue = new Map();
+/** What each camouflage pattern measured, taken as it was converted. */
+const patterns: Measured = new Map();
 
 /** Convert everything the current sweep holds, then empty the scratch tree. */
 async function drain(work: string, converted: Set<string>): Promise<void> {
@@ -70,7 +73,7 @@ async function drain(work: string, converted: Set<string>): Promise<void> {
     const referenced = settings.only
       ? new Set([...vehicles.values()].flatMap((v) => [...v.model.textures]))
       : undefined;
-    const textures = await convertTextures(work, converted, settings, referenced);
+    const textures = await convertTextures(work, converted, patterns, settings, referenced);
     if (textures > 0) log(`  ${textures} textures`);
   }
   // Everything converted has been deleted as it was consumed. What is left is
@@ -131,7 +134,7 @@ async function main(): Promise<void> {
     log(`${scripts.size} vehicle scripts read`);
     const decals = await convertDecals(work, converted, settings);
     if (decals > 0) log(`${decals} decals, marks and stickers`);
-    const { vehicles: written, bytes } = await publish(work, converted, scripts, vehicles, settings);
+    const { vehicles: written, bytes } = await publish(work, converted, scripts, vehicles, patterns, settings);
     fs.mkdirSync(settings.out, { recursive: true });
     fs.writeFileSync(versionFile, `${client.versionName}\n`);
     log(`done: ${written} vehicles, ${converted.size} textures, ${(bytes / 1e6).toFixed(1)} MB of metadata`);

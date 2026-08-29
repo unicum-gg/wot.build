@@ -19,6 +19,19 @@ import { VehicleBuilder } from "../vehicle.js";
 import { log, type Settings } from "./settings.js";
 import type { Accumulated, Vehicle } from "./sweep.js";
 
+/**
+ * What a camouflage pattern measured, taken as it is converted.
+ *
+ * **It cannot be read back later.** The scratch tree is emptied as it is
+ * consumed, so by the time the run publishes, the client's file is gone: reading
+ * it there threw ENOENT into a swallowing catch and every style shipped with no
+ * size and four weights, which lays a pattern at the wrong scale and puts the
+ * palette's fourth colour over the two thirds of patterns whose alpha is padding.
+ * Nothing showed it because the single-vehicle path keeps its sources and has
+ * always measured them itself.
+ */
+export type Measured = Map<string, { size: [number, number]; weights: 3 | 4 }>;
+
 // Shipped beside a vehicle's own textures but never drawn: a baked shadow the
 // garage puts under the tank.
 const NON_TEXTURE = /HangarShadowMap/i;
@@ -133,6 +146,7 @@ export function convertTrack(work: string, vehicle: Vehicle, into: Accumulated, 
 export async function convertTextures(
   work: string,
   into: Set<string>,
+  measured: Measured,
   settings: Settings,
   wanted?: Set<string>,
 ): Promise<number> {
@@ -176,7 +190,7 @@ export async function convertTextures(
       const target = path.join(settings.out, texturePath(relative));
       fs.mkdirSync(path.dirname(target), { recursive: true });
       try {
-        if (isPatternPath(relative)) await convertCamouflage(full, target);
+        if (isPatternPath(relative)) measured.set(relative, await convertCamouflage(full, target));
         else {
           await convertTexture(
             full,

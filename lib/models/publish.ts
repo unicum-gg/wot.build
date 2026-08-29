@@ -14,7 +14,7 @@ import { readStyles, type Style2D } from "../style.js";
 import { patternWeights } from "../texture.js";
 import { texturePath } from "../material.js";
 import type { VehicleModel } from "../model.js";
-import { isPatternPath } from "./convert.js";
+import type { Measured } from "./convert.js";
 import type { Settings } from "./settings.js";
 import type { Catalogue } from "./sweep.js";
 
@@ -24,6 +24,7 @@ export async function publish(
   converted: Set<string>,
   scripts: Map<string, VehicleScript>,
   vehicles: Catalogue,
+  patterns: Measured,
   settings: Settings,
 ): Promise<{ vehicles: number; bytes: number }> {
   const published = new Set([...converted].map(texturePath));
@@ -32,22 +33,6 @@ export async function publish(
   // A style names itself with a key. Without the catalogue a viewer offers
   // `generic_custom_look_ussr` where the game offers "Made in the U.S.S.R.".
   const names = await readCatalogue("vehicle_customization").catch(() => new Map<string, string>());
-  /**
-   * Each camouflage pattern's own pixel size, which the computed tiling path
-   * divides by. Read from the client's file rather than from what is published,
-   * since the conversion caps the side.
-   */
-  const patterns = new Map<string, { size: [number, number]; weights: 3 | 4 }>();
-  for (const at of converted) {
-    if (!isPatternPath(at)) continue;
-    try {
-      const { width, height, rgba } = decodeDDS(fs.readFileSync(path.join(work, at)));
-      patterns.set(at, { size: [width, height], weights: patternWeights(rgba, width * height) });
-    } catch {
-      // A pattern we cannot measure falls back to the shader's own default.
-    }
-  }
-
   /** One vehicle's 2D styles, resolved and kept only where the mirror has them. */
   const wearable = (identity: ReturnType<typeof readVehicleIdentity>, have: Set<string>): Style2D[] => {
     if (!identity || !fs.existsSync(customization)) return [];
