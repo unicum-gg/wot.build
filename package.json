@@ -6,7 +6,8 @@
     "sources": "tsx generate-sources.ts",
     "assets": "tsx generate-assets.ts",
     "maps": "tsx generate-maps.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "models": "tsx generate-models.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
