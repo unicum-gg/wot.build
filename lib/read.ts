@@ -5,8 +5,9 @@
 // how the four copies of `numbers` came to disagree with each other: two filter
 // out what does not parse, one keeps the NaN, and only one handles a value the
 // decoder already turned into a number. Those are left where they are until each
-// caller's behaviour can be checked; these four are identical everywhere and are
-// shared.
+// caller's behaviour can be checked. So is `visual.ts`'s `rawText`, which does
+// not trim where this one does. What is here is what was identical wherever it
+// appeared.
 import type { PackedNode } from "./packed.js";
 
 export function child(node: PackedNode | undefined, name: string): PackedNode | undefined {

@@ -13,6 +13,7 @@
 // Geometry arrives already posed in the vehicle's own space, including the
 // skinned chassis, so nothing has to be transformed to draw a vehicle at rest.
 import { decodePacked, type PackedNode } from "./packed.js";
+import { child, children } from "./read.js";
 
 export type VisualNode = {
   name: string;
@@ -64,15 +65,17 @@ export type Visual = {
   boundingBox: { min: number[]; max: number[] } | null;
 };
 
-function child(node: PackedNode, name: string): PackedNode | undefined {
-  return node.children.find((c) => c.name === name);
-}
 
-function children(node: PackedNode, name: string): PackedNode[] {
-  return node.children.filter((c) => c.name === name);
-}
 
-function text(node: PackedNode | undefined): string {
+/**
+ * A value as the client wrote it, whitespace and all.
+ *
+ * Deliberately not `read.ts`'s `text`: a material's property name arrives with
+ * stray text around it and has to be trimmed, but a texture path is taken whole
+ * because nothing has shown the client pads one, and trimming every value here
+ * would change what is published without anything to check it against.
+ */
+function rawText(node: PackedNode | undefined): string {
   return typeof node?.value === "string" ? node.value : "";
 }
 
@@ -87,7 +90,7 @@ function numbers(node: PackedNode | undefined): number[] {
 
 function readNode(node: PackedNode): VisualNode {
   return {
-    name: text(child(node, "identifier")),
+    name: rawText(child(node, "identifier")),
     transform: numbers(child(node, "transform")),
     children: children(node, "node").map(readNode),
   };
@@ -122,23 +125,23 @@ function readMaterial(node: PackedNode): VisualMaterial {
     const carried = property.children[0];
     if (!name || !carried) continue;
     if (carried.name === "Texture") {
-      textures[name] = text(carried);
+      textures[name] = rawText(carried);
       continue;
     }
     const value = propertyValue(carried);
     if (value !== null) values[name] = value;
   }
-  return { name: text(child(node, "identifier")), shader: text(child(node, "fx")), textures, values };
+  return { name: rawText(child(node, "identifier")), shader: rawText(child(node, "fx")), textures, values };
 }
 
 function readRenderSet(node: PackedNode): VisualRenderSet | null {
   const geometry = child(node, "geometry");
   if (!geometry) return null;
   return {
-    bones: children(node, "node").map((c) => text(c)),
-    vertices: text(child(geometry, "vertices")),
-    indices: text(child(geometry, "primitive")),
-    stream: text(child(geometry, "stream")),
+    bones: children(node, "node").map((c) => rawText(c)),
+    vertices: rawText(child(geometry, "vertices")),
+    indices: rawText(child(geometry, "primitive")),
+    stream: rawText(child(geometry, "stream")),
     materials: children(geometry, "primitiveGroup")
       .map((group) => child(group, "material"))
       .filter((m): m is PackedNode => m !== undefined)
