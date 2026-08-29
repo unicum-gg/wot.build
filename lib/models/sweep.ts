@@ -67,10 +67,6 @@ const SKIN_GLOBS = ["vehicles/*/*/_skins/*/normal/lod0/*", "vehicles/*/*/_skins/
 // in the `gui-part*` packages rather than in any vehicle package.
 const DECAL_GLOBS = ["gui/maps/vehicles/decals/*", "gui/maps/vehicles/decals/*/*", "gui/maps/vehicles/decals/*/*/*"];
 
-// Shipped beside a vehicle's own textures but never drawn: a baked shadow the
-// garage puts under the tank.
-const NON_TEXTURE = /HangarShadowMap/i;
-
 /**
  * Every package a part holds, keyed by name.
  *
