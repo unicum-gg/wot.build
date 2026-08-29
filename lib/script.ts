@@ -23,6 +23,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { decodePacked, isPacked, type PackedNode } from "./packed.js";
+import { chassisWheels, type ChassisWheel } from "./chassis.js";
+import { readSlots, type CustomizationSlot } from "./slots.js";
+import { child } from "./read.js";
 
 /** Where the vehicle scripts sit inside their package. */
 export const VEHICLE_SCRIPTS_GLOB = "scripts/item_defs/vehicles/*/*.xml";
@@ -41,67 +44,8 @@ export const CUSTOMIZATION_GLOBS = [
   "scripts/item_defs/customization/*/*.xml",
 ];
 
-/** What a chassis says about one of its wheels, which no mesh says. */
-export type ChassisWheel = {
-  /** The node the client turns, as the tree names it: `W_L0`, `WD_R1`. */
-  name: string;
-  /** How big the wheel is, which is what decides how fast it turns. */
-  radius: number;
-  /**
-   * The circle the track wraps it on, which is not its rim.
-   *
-   * On a drive sprocket the track sits down in the tooth roots, well inside the
-   * tips: the IS-7's is a 432 mm wheel the track wraps at 381. On an idler it
-   * stands off instead, by the link's own thickness. Only the road wheels have
-   * the two the same.
-   */
-  wrap: number;
-};
 
-/** What a script says about one vehicle, keyed the way the content tree is. */
-/** What kind of thing a slot takes. The client's own names. */
-export enum SlotKind {
-  /** The marks of excellence, on the gun. */
-  InsigniaOnGun = "insigniaOnGun",
-  /** A clan's emblem. */
-  Clan = "clan",
-  /** A player's own emblem. */
-  Player = "player",
-  /** Painted lettering. */
-  Inscription = "inscription",
-  /** The projected decals a 2D style carries. */
-  ProjectionDecal = "projectionDecal",
-}
 
-export type CustomizationSlot = {
-  kind: string;
-  id: number;
-  /**
-   * The ray to project along, and the decal's up vector. Slots of the older
-   * kinds carry these; a projection decal carries a box instead.
-   */
-  rayStart: number[] | null;
-  rayEnd: number[] | null;
-  rayUp: number[] | null;
-  /** A projection decal's own box: where it sits, how it is turned, how big. */
-  position: number[] | null;
-  rotation: number[] | null;
-  scale: number[] | null;
-  /**
-   * What may go in this slot. A projection decal names the tags it needs and
-   * the client puts it in a slot carrying all of them: `safe left
-   * formfactor_square` picks out one place on this vehicle and no other.
-   */
-  tags: string[];
-  /** Which part the slot shows on, as an `appliedTo` bit. */
-  showOn: number;
-  /** How wide the mark is, in metres. */
-  size: number;
-  /** Mirrored onto the vehicle's other side. */
-  mirrored: boolean;
-  /** Named only when the slot belongs to one 3D style rather than the vehicle. */
-  model: string | null;
-};
 
 /**
  * What a piece says about the camouflage laid on it.
@@ -192,9 +136,6 @@ export type VehicleScript = {
   sets: Record<string, Record<string, string>>;
 };
 
-function child(node: PackedNode | undefined, name: string): PackedNode | undefined {
-  return node?.children.find((c) => c.name === name);
-}
 
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];
@@ -243,94 +184,8 @@ function plates(node: PackedNode | undefined): { armor: Record<string, number>; 
   return { armor, spaced };
 }
 
-/**
- * The wheels a chassis declares.
- *
- * `wheels` names the drive wheels and idlers one at a time and the road wheels
- * as a run: a `group` with `template` `W_L`, `startIndex` 0 and `count` 7 means
- * `W_L0` through `W_L6`, all of one radius. Where the track wraps them is kept
- * somewhere else entirely, in the physical track's `wheelGroups`, and falls back
- * to the wheel itself where the vehicle gives none.
- */
-function chassisWheels(node: PackedNode): Record<string, ChassisWheel> {
-  const declared = child(node, "wheels");
-  if (!declared) return {};
-  const radius: Record<string, number> = {};
-  for (const wheel of declared.children) {
-    const size = numbers(child(wheel, "radius"))[0];
-    if (!Number.isFinite(size) || size <= 0) continue;
-    if (wheel.name === "wheel") {
-      const name = String(child(wheel, "name")?.value ?? "").trim();
-      if (name) radius[name] = size;
-      continue;
-    }
-    if (wheel.name !== "group") continue;
-    const template = String(child(wheel, "template")?.value ?? "").trim();
-    const start = numbers(child(wheel, "startIndex"))[0] || 0;
-    const count = numbers(child(wheel, "count"))[0] || 0;
-    if (!template) continue;
-    for (let i = 0; i < count; i++) radius[`${template}${start + i}`] = size;
-  }
 
-  const wrap: Record<string, number> = {};
-  const groups = (from: PackedNode): void => {
-    if (from.name === "wheelGroup") {
-      const size = numbers(child(from, "groupRadius"))[0];
-      if (Number.isFinite(size) && size > 0) {
-        for (const named of from.children.filter((c) => c.name === "wheelName")) {
-          const name = String(named.value ?? "").trim();
-          if (name && wrap[name] === undefined) wrap[name] = size;
-        }
-      }
-      return;
-    }
-    for (const c of from.children) groups(c);
-  };
-  const tracks = child(node, "tracks");
-  if (tracks) groups(tracks);
 
-  return Object.fromEntries(
-    Object.entries(radius).map(([name, size]) => [name, { name, radius: size, wrap: wrap[name] ?? size }]),
-  );
-}
-
-/**
- * Three angles as the client wrote them.
- *
- * **Kept unflipped on purpose.** A slot's rotation is not read as a rotation of
- * the mirrored vehicle: the axes it names are taken out of it first and each is
- * mirrored on its own. Pushing the angles through the point reader, which
- * negates X, turned a decal the wrong way and inside out.
- */
-function plain3(value: PackedNode | undefined): number[] | null {
-  const raw = numbers(value);
-  return raw.length >= 3 && raw.every((n) => !Number.isNaN(n)) ? raw.slice(0, 3) : null;
-}
-
-function readSlots(node: PackedNode | undefined): CustomizationSlot[] {
-  const out: CustomizationSlot[] = [];
-  for (const slot of node?.children ?? []) {
-    const kind = String(child(slot, "slotType")?.value ?? "").trim();
-    if (!kind) continue;
-    const model = child(slot, "compatibleModels")?.value;
-    out.push({
-      kind,
-      id: Number(child(slot, "slotId")?.value ?? 0),
-      rayStart: vector3(child(slot, "rayStart")),
-      rayEnd: vector3(child(slot, "rayEnd")),
-      rayUp: vector3(child(slot, "rayUp")),
-      position: vector3(child(slot, "position")),
-      rotation: plain3(child(slot, "rotation")),
-      scale: plain3(child(slot, "scale")),
-      tags: String(child(slot, "tags")?.value ?? "").trim().split(/\s+/).filter(Boolean),
-      showOn: Number(child(slot, "showOn")?.value ?? 0),
-      size: Number(String(child(slot, "size")?.value ?? 0)) || 0,
-      mirrored: String(child(slot, "isMirrored")?.value ?? "") === "true" || child(slot, "isMirrored")?.value === true,
-      model: typeof model === "string" ? model.trim() : null,
-    });
-  }
-  return out;
-}
 
 /** `vehicles/russian/R45_IS-7/normal/lod0/Turret_01.model` split in two. */
 function modelPath(node: PackedNode): { content: string; piece: string } | null {
