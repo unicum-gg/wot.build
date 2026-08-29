@@ -1,0 +1,1372 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>live armour</title>
+    <style>
+      :root { --panel: #0b0d12e8; --line: #1e2430; --text: #cfd6e4; --dim: #8b93a3; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #0d0f13; color: var(--text); font: 13px/1.55 system-ui, sans-serif; overflow: hidden; }
+      canvas { display: block; }
+      .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; backdrop-filter: blur(6px); }
+      #shells { left: 12px; top: 12px; width: 272px; }
+      #readout { right: 12px; top: 12px; width: 280px; }
+      #legend { left: 12px; bottom: 12px; width: 300px; }
+      h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+      .shell { display: flex; align-items: baseline; gap: 8px; padding: 5px 7px; border-radius: 6px; cursor: pointer; }
+      .shell:hover { background: #ffffff0d; }
+      .shell.on { background: #ffffff14; box-shadow: inset 0 0 0 1px #ffffff1f; }
+      .shell .n { flex: 1; color: #fff; }
+      .shell .p { font-variant-numeric: tabular-nums; }
+      .kind, .t { font-size: 11px; color: var(--dim); }
+      .row { display: flex; justify-content: space-between; gap: 10px; }
+      .row .k { color: var(--dim); }
+      .row .v { color: #fff; font-variant-numeric: tabular-nums; }
+      .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
+      hr { border: 0; border-top: 1px solid var(--line); margin: 9px 0; }
+      label.opt { display: flex; align-items: center; gap: 7px; color: var(--dim); cursor: pointer; margin-top: 4px; }
+      input[type=range] { width: 100%; accent-color: #6ea8fe; }
+      .verdict { display: inline-block; font-weight: 600; padding: 3px 9px; border-radius: 5px; }
+      .layer { display: flex; justify-content: space-between; gap: 10px; font-variant-numeric: tabular-nums; }
+      .hint { color: var(--dim); font-size: 12px; }
+      .ramp { height: 9px; border-radius: 3px; margin: 2px 0 3px; }
+      .ends { display: flex; justify-content: space-between; color: var(--dim); font-size: 11px; margin-bottom: 7px; }
+      .views { display: flex; gap: 4px; margin: 0 0 9px; }
+      .view { flex: 1; padding: 6px 0; border: 0; border-radius: 6px; background: #ffffff0f; color: var(--dim); font: inherit; font-weight: 500; cursor: pointer; }
+      .view:hover { background: #ffffff1a; color: #fff; }
+      .view.on { background: #ffffff26; color: #fff; box-shadow: inset 0 0 0 1px #ffffff2b; }
+      select { width: 100%; margin-top: 6px; padding: 6px 8px; border: 0; border-radius: 6px; background: #ffffff0f; color: #fff; font: inherit; cursor: pointer; }
+      select:hover { background: #ffffff1a; }
+      select option { background: #1b2027; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div class="panel" id="shells">loading…</div>
+    <div class="panel" id="readout"><h2>Impact</h2><div class="hint">Point at the tank.</div></div>
+    <div class="panel" id="legend"></div>
+    <script type="importmap">
+      { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/" } }
+    </script>
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+
+      const params = new URLSearchParams(location.search);
+      const ROOT = params.get("root") ?? "/models";
+      const VEHICLE = params.get("v") ?? "russian/R45_IS-7";
+      const AMMO = params.get("ammo") ?? "/shells.json";
+      /**
+       * Rebuilding the mirror rewrites files in place, and the browser happily
+       * keeps serving the old ones behind a reloaded page. Every asset carries
+       * the page's own cache-buster so what is on screen is what is on disk.
+       */
+      const STAMP = params.get("cb") ?? "";
+      const fresh = (url) => (STAMP ? `${url}${url.includes("?") ? "&" : "?"}cb=${STAMP}` : url);
+
+      // What a shell does where it lands.
+      //
+      // How often the shot gets through is a sliding thing, not three buckets,
+      // so it reads as a ramp: red where it never does, through yellow at even
+      // odds, to green where it always does. Two answers sit outside that scale
+      // and get a colour of their own, because neither is a matter of odds: a
+      // shell that glances off, and one whose calibre is three times the plate
+      // and so cannot be turned away at all.
+      const RAMP = { none: 0xff0000, even: 0xffff00, always: 0x00ff00 };
+      /** Anything that is not armour reads as one neutral grey. */
+      const NOT_ARMOUR = 0xa6a6a6;
+      /**
+       * The observation devices, which are neither armour nor quite a module
+       * like the others: they are the thing a player aims at to blind a tank
+       * without killing it, so they get a colour that says "here", not "steel".
+       */
+      const OPTICS = 0xe14dff;
+      const OUTCOME = {
+        ricochet: { colour: 0xff66ff, label: "glances off, whatever the shell" },
+        overmatch: { colour: 0x00ffff, label: "overmatched, cannot be turned away" },
+        screen: { colour: NOT_ARMOUR, label: "a screen or track, nothing behind" },
+        module: { colour: NOT_ARMOUR, label: "a module, not armour" },
+        unknown: { colour: NOT_ARMOUR, label: "no thickness published" },
+      };
+
+      // These are not lights, they are labels: the value written here is the
+      // value that has to reach the screen. Handed to three the usual way, a
+      // colour is taken as sRGB and converted into the renderer's linear working
+      // space, and this viewer composites through a float target of its own
+      // rather than one of three's materials, so nothing ever converts it back.
+      // Every grey then arrives about a stop darker than it was chosen to be.
+      const swatch = (hex) => new THREE.Color().setHex(hex, THREE.NoColorSpace);
+
+      /**
+       * The two questions an armour model answers.
+       *
+       * `live` is what a given shell would do here, which changes with the
+       * shell and with where it is fired from. `collision` is what the plate
+       * is, which does not: it reads the vehicle on its own terms, and is the
+       * one to reach for when comparing two tanks rather than one duel.
+       */
+      const VIEW = { live: "live", collision: "collision", visual: "visual" };
+
+      /** How far the penetration roll reaches either side of the nominal value. */
+      const SPREAD = 0.25;
+
+      // How a pixel's armour is classified once the layers are added up. The
+      // shader packs its findings into one float per pixel, and these are the
+      // values it uses.
+      const KIND = { none: 0, armour: 1, module: 2, unknown: 3, overmatched: 4, screenOnly: 5, optics: 6 };
+      /** Stands in for an impossible thickness, which is how a ricochet travels. */
+      const BLOCKED = 1e6;
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.05, 300);
+      const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.autoClear = false;
+      document.body.appendChild(renderer.domElement);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      const grid = new THREE.Scene();
+      grid.add(new THREE.GridHelper(24, 24, 0x223050, 0x161c2b));
+
+      // Where the layers are gathered before anything is coloured.
+      //
+      //  R: the effective thickness of every screen standing in front
+      //  G: what the surface under the pixel is, one of KIND
+      //  B: that surface's own effective thickness
+      //  A: how squarely it faces the camera, kept for the shading
+      // Both passes keep their depth, because whether a track hides a road
+      // wheel or the wheel shows through is a question of which is in front.
+      const depthOf = () => new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
+      const gather = new THREE.WebGLRenderTarget(1, 1, { type: THREE.FloatType, depthTexture: depthOf() });
+      // Screens are gathered apart, with a depth of their own, and are read only
+      // where the vehicle left the pixel empty. Keeping them in a second target
+      // is what lets a track hide a road wheel while still being counted as a
+      // layer over the hull rather than drawn on top of it.
+      const shapes = new THREE.WebGLRenderTarget(1, 1, { type: THREE.FloatType, depthTexture: depthOf() });
+
+      /** The backdrop behind the vehicle, in linear light. */
+      const BACKDROP = new THREE.Color(0x0d0f13).toArray();
+      let built = null;
+      function resize() {
+        const w = innerWidth;
+        const h = innerHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+        const ratio = renderer.getPixelRatio();
+        gather.setSize(Math.floor(w * ratio), Math.floor(h * ratio));
+        shapes.setSize(Math.floor(w * ratio), Math.floor(h * ratio));
+        if (built) built.setSize(w, h);
+      }
+      addEventListener("resize", resize);
+
+      // The game's penetration rules, worked out per pixel.
+      //
+      //  - the impact angle is measured off the plate's own normal
+      //  - a shell straightens by its normalisation, and by more when its
+      //    calibre is over twice the plate: the two-calibre rule
+      //  - it cannot ricochet at all once its calibre reaches three times the
+      //    plate: the three-calibre rule
+      //  - what is left of the angle stretches the plate by one over its cosine
+      // How much a face is turned into the light, from nothing to fully lit.
+      //
+      // It never darkens: the colour a surface is given is the colour it shows
+      // at its dullest, and a face turned towards the light is lifted towards
+      // white from there. Shading the other way, by multiplying a colour down,
+      // is what made every grey here read as dirty next to a viewer that lights
+      // its model properly.
+      const LIGHTING = `
+        float relief(vec3 n) {
+          float top = max(dot(n, normalize(vec3(0.45, 0.82, 0.35))), 0.0);
+          float side = max(dot(n, normalize(vec3(-0.7, 0.3, 0.6))), 0.0);
+          return clamp(top * 0.72 + side * 0.28, 0.0, 1.0);
+        }
+      `;
+
+      const RULES = `
+        uniform float penetration;
+        uniform float caliber;
+        uniform float normalisation;
+        uniform float ricochetAngle;
+        uniform float calibreRules;
+        uniform float byThickness;
+
+        // Nearly every vehicle declares a few plates at zero. They are the
+        // openings in a hull, not steel, so a shell goes straight through and
+        // there is nothing for a calibre rule to act on.
+        bool overmatches(float thickness) {
+          return thickness > 0.0 && calibreRules > 0.5 && caliber >= 3.0 * thickness;
+        }
+
+        float effectiveThickness(float thickness, float facing) {
+          float angle = degrees(acos(clamp(facing, 0.0, 1.0)));
+          float straighten = normalisation;
+          if (calibreRules > 0.5 && caliber > 2.0 * thickness) straighten *= (1.4 * caliber) / (2.0 * thickness);
+          if (!overmatches(thickness) && angle >= ricochetAngle) return ${BLOCKED.toFixed(1)};
+          float left = max(angle - straighten, 0.0);
+          return thickness / max(cos(radians(left)), 0.02);
+        }
+      `;
+
+      const VERTEX = `
+        varying vec3 vNormal;
+        varying vec3 vView;
+        void main() {
+          vNormal = normalize(mat3(modelMatrix) * normal);
+          vec4 world = modelMatrix * vec4(position, 1.0);
+          vView = cameraPosition - world.xyz;
+          gl_Position = projectionMatrix * viewMatrix * world;
+        }
+      `;
+
+      // A surface of the vehicle itself: whatever a shell reaches first and
+      // would actually damage.
+      const SOLID = `
+        precision highp float;
+        varying vec3 vNormal;
+        varying vec3 vView;
+        uniform float thickness;
+        uniform float kind;
+        ${LIGHTING}
+        ${RULES}
+        void main() {
+          vec3 n = normalize(vNormal);
+          // A collision mesh is a shell, so a face turned away from the camera
+          // is lit as if it were turned towards it. Without this the inside of
+          // a hull comes out black wherever it shows through an opening.
+          if (!gl_FrontFacing) n = -n;
+          float facing = abs(dot(n, normalize(vView)));
+          bool armour = kind == ${KIND.armour.toFixed(1)};
+          // Reading the plate rather than the shot: what it is, not what a
+          // shell would make of it, so neither the angle nor the calibre rules
+          // come into it.
+          float own = !armour ? 0.0
+            : byThickness > 0.5 ? thickness
+            : effectiveThickness(thickness, facing);
+          float said = armour && byThickness < 0.5 && overmatches(thickness)
+            ? ${KIND.overmatched.toFixed(1)}
+            : kind;
+          gl_FragColor = vec4(0.0, said, own, relief(n));
+        }
+      `;
+
+      // A screen drawn for its own sake, so that one standing in front of open
+      // air still has a shape and a light on it. It writes no depth, so the
+      // vehicle behind it paints over it in the pass that follows.
+      const SCREEN_SHAPE = `
+        precision highp float;
+        varying vec3 vNormal;
+        varying vec3 vView;
+        uniform float thickness;
+        ${LIGHTING}
+        void main() {
+          vec3 n = normalize(vNormal);
+          if (!gl_FrontFacing) n = -n;
+          gl_FragColor = vec4(0.0, ${KIND.screenOnly.toFixed(1)}, thickness, relief(n));
+        }
+      `;
+
+      // A screen: spaced armour with the vehicle somewhere behind it. Screens
+      // are drawn additively over whatever the pass above found, so a pixel
+      // ends up carrying the sum of everything the shell has to cross.
+      const SCREEN = `
+        precision highp float;
+        varying vec3 vNormal;
+        varying vec3 vView;
+        uniform float thickness;
+        ${RULES}
+        void main() {
+          float facing = abs(dot(normalize(vNormal), normalize(vView)));
+          gl_FragColor = vec4(effectiveThickness(thickness, facing), 0.0, 0.0, 0.0);
+        }
+      `;
+
+      // Adding the layers up and saying what a player would see.
+      const COMPOSE = `
+        precision highp float;
+        varying vec2 vUv;
+        uniform sampler2D gathered;
+        uniform sampler2D screenShapes;
+        uniform sampler2D gatheredDepth;
+        uniform sampler2D screenDepth;
+        uniform float penetration;
+        uniform float byThickness;
+        uniform vec3 rampNone;
+        uniform vec3 rampEven;
+        uniform vec3 rampAlways;
+        uniform vec3 colourRicochet;
+        uniform vec3 colourOvermatch;
+        uniform vec2 armourRange;
+        uniform vec3 colourModule;
+        uniform vec3 colourOptics;
+        uniform vec3 colourUnknown;
+
+        // A screen is not on the penetration scale at all: it stops nothing by
+        // itself. It gets a scale of its own instead, running from blue where
+        // it is as thick as the vehicle's own armour to violet where it is
+        // barely a skirt, so a player can tell one from the other at a glance.
+        /** Where a thickness sits in this vehicle's own span, 0 thin to 1 thick. */
+        float share(float thickness) {
+          return clamp((thickness - armourRange.x) / max(armourRange.y - armourRange.x, 1.0), 0.0, 1.0);
+        }
+
+        vec3 fromHue(float hue) {
+          // Fully saturated, half lightness: the hue alone carries it.
+          vec3 k = mod(vec3(5.0, 3.0, 1.0) + (hue / 360.0) * 6.0, 6.0);
+          return 1.0 - clamp(min(k, min(4.0 - k, vec3(1.0))), 0.0, 1.0);
+        }
+
+        vec3 screenColour(float thickness) {
+          // A track is spaced armour like any other, but it is also the one
+          // part of a vehicle every player already recognises, so it keeps the
+          // neutral grey rather than joining the scale.
+          if (thickness < 0.0) return colourModule;
+          return fromHue((1.0 - share(thickness)) * 120.0 + 200.0);
+        }
+
+        void main() {
+          vec4 g = texture2D(gathered, vUv);
+          float screens = g.r;
+          float kind = g.g;
+          float own = g.b;
+          float lift = g.a;
+
+          // A screen shows in its own right in two cases: where the vehicle
+          // covers nothing at all behind it, and where it stands in front of a
+          // module, since a track really does hide the road wheel behind it.
+          // Over armour it stays a layer to be counted, never something drawn
+          // on top, which is the whole point of adding the thicknesses up.
+          vec4 only = texture2D(screenShapes, vUv);
+          bool screenAhead = only.g > 0.0 && texture2D(screenDepth, vUv).r < texture2D(gatheredDepth, vUv).r;
+          bool nothingBehind = kind == ${KIND.none.toFixed(1)};
+          bool hidesModule = kind == ${KIND.module.toFixed(1)} && screenAhead;
+          float screenThickness = 0.0;
+          if (only.g > 0.0 && (nothingBehind || hidesModule)) {
+            kind = only.g;
+            lift = only.a;
+            screens = 0.0;
+            screenThickness = only.b;
+          }
+
+          // Nothing of the vehicle here, and no screen either: let the grid
+          // behind show through rather than painting over it.
+          if (kind == ${KIND.none.toFixed(1)}) discard;
+
+          vec3 tint;
+          if (kind == ${KIND.screenOnly.toFixed(1)}) {
+            tint = screenColour(screenThickness);
+          } else if (kind == ${KIND.optics.toFixed(1)}) {
+            tint = colourOptics;
+          } else if (kind == ${KIND.module.toFixed(1)}) {
+            tint = colourModule;
+          } else if (kind == ${KIND.unknown.toFixed(1)}) {
+            tint = colourUnknown;
+          } else if (byThickness > 0.5) {
+            // Thin runs green, thick runs red, over this vehicle's own span.
+            tint = fromHue((1.0 - share(own)) * 120.0);
+          } else {
+            float total = screens + own;
+            if (total >= ${(BLOCKED / 2).toFixed(1)}) {
+              tint = colourRicochet;
+            } else if (kind == ${KIND.overmatched.toFixed(1)}) {
+              tint = colourOvermatch;
+            } else {
+              float low = penetration * ${(1 - SPREAD).toFixed(2)};
+              float high = penetration * ${(1 + SPREAD).toFixed(2)};
+              float odds = clamp((high - total) / max(high - low, 0.001), 0.0, 1.0);
+              tint = odds > 0.5
+                ? mix(rampEven, rampAlways, (odds - 0.5) * 2.0)
+                : mix(rampNone, rampEven, odds * 2.0);
+            }
+          }
+          // A face turned into the light is lifted towards white, never dimmed,
+          // so every colour here shows at least the value it was given.
+          tint = mix(tint, vec3(1.0), lift * 0.22);
+          // Where the answer had to be worked out through a screen, the pixel
+          // is pulled back a little so a player can still see where the tracks
+          // and skirts are without losing the answer for the shot as a whole.
+          // A screen is worth seeing in its own right: it is the difference
+          // between a flank and a flank with a skirt over it. It is laid over
+          // the answer rather than replacing it, so the colour underneath still
+          // shows through and the hover readout still has the whole stack.
+          if (only.g > 0.0 && screenAhead && kind != ${KIND.screenOnly.toFixed(1)}) {
+            tint = mix(tint, screenColour(only.b), only.b < 0.0 ? 0.5 : 0.7);
+          }
+          gl_FragColor = vec4(tint, 1.0);
+        }
+      `;
+
+      // Named parts of a vehicle that are not armour at all: the optics, the
+      // breech and the road wheels are modules, drawn so the shape reads but
+      // never answering a penetration question.
+      const MODULE = /^(surveyingDevice|gunBreech|wheel|gun)$/;
+      /** The vision blocks and periscopes, which the client names on their own. */
+      const OPTIC = /^surveyingDevice$/;
+      /** The shells that punch through rather than burn through. */
+      const SOLID_SHOT = /^ARMOR_PIERCING/;
+      const TRACK = /Track$/;
+
+      /** Every plate's shot uniforms, shared so one assignment updates them all. */
+      const shotUniforms = {
+        penetration: { value: 0 },
+        byThickness: { value: 0 },
+        caliber: { value: 0 },
+        normalisation: { value: 0 },
+        ricochetAngle: { value: 90 },
+        // The calibre rules are a solid shot's: a shaped charge burns through
+        // rather than punching, so it neither straightens against a thick plate
+        // nor overmatches a thin one, and it glances off at its own angle
+        // whatever its calibre.
+        calibreRules: { value: 1 },
+      };
+
+      const shot = { name: "", kind: "", penetration: 0, caliber: 0, normalisation: 0, ricochet: 90, range: 100, maxDistance: 720, damage: 0, calibreRules: true };
+
+      // The collision file carries everything an armour view needs: the shapes,
+      // what each is worth in millimetres, and where the pieces hang off each
+      // other. Nothing here reads the visual model, which some vehicles ship
+      // incomplete.
+      const [collision, ammo] = await Promise.all([
+        fetch(fresh(`${ROOT}/vehicles/${VEHICLE}/collision.json`)).then((r) => r.json()),
+        fetch(fresh(AMMO)).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      ]);
+
+      // A piece is modelled around its own origin and sits where the piece it
+      // hangs off says: the hull rides on the chassis, the turret sits on the
+      // hull, the gun in the turret. That is also how the game articulates a
+      // vehicle, so the same groups let the turret turn and the gun pitch.
+      const first = (prefix) => Object.keys(collision.parts).sort().find((n) => n.startsWith(prefix));
+      const turretName = first("Turret");
+      const gunName = first("Gun");
+
+      const hullGroup = new THREE.Group();
+      hullGroup.position.fromArray(collision.hullPosition ?? [0, 0, 0]);
+      const turretGroup = new THREE.Group();
+      turretGroup.position.fromArray(collision.mounts?.turret ?? [0, 0, 0]);
+      const gunGroup = new THREE.Group();
+      gunGroup.position.fromArray(collision.mounts?.guns?.[turretName ?? ""] ?? [0, 0, 0]);
+
+      // How far this vehicle can actually bring its gun to bear. A casemate is
+      // a casemate because of these numbers, and reading its armour with the
+      // superstructure swung round would be reading a vehicle that cannot exist.
+      const yawLimit = collision.mounts?.yaw?.[gunName ?? ""] ?? null;
+      // The client counts pitch downwards, so its upper bound is the depression
+      // a player talks about and its lower bound is the elevation.
+      const pitchLimit = collision.mounts?.pitch?.[gunName ?? ""] ?? [-15, 5];
+      turretGroup.add(gunGroup);
+      hullGroup.add(turretGroup);
+      scene.add(hullGroup);
+
+      // Everything the vehicle is made of hangs off this, so a mirror applies to
+      // the chassis and the belt as well as to the hull.
+      const vehicle = new THREE.Group();
+
+      scene.remove(hullGroup);
+      vehicle.add(hullGroup);
+      scene.add(vehicle);
+
+      function parentFor(name) {
+        if (name.startsWith("Chassis") || name.startsWith("Wheel")) return vehicle;
+        if (name === turretName) return turretGroup;
+        if (name === gunName) return gunGroup;
+        return hullGroup;
+      }
+
+      // Screens are gathered in a pass of their own, so they live on a layer of
+      // their own rather than being picked out of the scene each frame.
+      const LAYER = { shape: 1, solid: 2, screen: 3 };
+
+      // The span of the vehicle's own armour, which is what a screen's colour
+      // is read against: thick as the hull it hangs off, or barely a skirt.
+      const thicknesses = [];
+      for (const [part, table] of Object.entries(collision.armor ?? {})) {
+        const screens = new Set(collision.spaced?.[part] ?? []);
+        for (const [name, value] of Object.entries(table)) {
+          if (name.startsWith("armor_") && !screens.has(name)) thicknesses.push(value);
+        }
+      }
+      const armourRange = thicknesses.length
+        ? [Math.min(...thicknesses), Math.max(...thicknesses)]
+        : [0, 1];
+
+      const plates = [];
+      /** The screen twins, drawn for their shape rather than for the ray. */
+      const shapePlates = [];
+      for (const [part, mesh] of Object.entries(collision.parts)) {
+        // A gun or a turret ships every variant it was ever sold with; show the
+        // first of each, which is the one the rest of the model is placed for.
+        if (/_\d+$/.test(part) && !/_0?1$/.test(part)) continue;
+        const table = collision.armor?.[part] ?? {};
+        const screens = new Set(collision.spaced?.[part] ?? []);
+        const parent = parentFor(part);
+        const positions = new Float32Array(mesh.positions);
+
+        for (const group of mesh.groups) {
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          geometry.setIndex(mesh.indices.slice(group.start, group.start + group.count));
+          geometry.computeVertexNormals();
+
+          const thickness = table[group.name] ?? null;
+          const isModule = MODULE.test(group.name);
+          const isOptic = OPTIC.test(group.name);
+          // A screen stands off the vehicle: beating it reaches nothing, only
+          // what lies behind. Tracks are the screen every vehicle carries.
+          const spaced = !isModule && thickness !== null && (screens.has(group.name) || TRACK.test(group.name));
+          const kind = isOptic
+            ? KIND.optics
+            : isModule
+              ? KIND.module
+              : thickness === null
+                ? KIND.unknown
+                : KIND.armour;
+
+          const material = new THREE.ShaderMaterial({
+            vertexShader: VERTEX,
+            fragmentShader: spaced ? SCREEN : SOLID,
+            uniforms: { ...shotUniforms, thickness: { value: thickness ?? 0 }, kind: { value: kind } },
+            side: THREE.FrontSide,
+
+            // Screens add their thickness to what the pass before found, so
+            // they blend as a plain sum. The stock additive mode weighs the
+            // source by its alpha, and this shader keeps alpha at zero so it
+            // leaves the facing underneath alone, which would add nothing.
+            ...(spaced
+              ? {
+                  blending: THREE.CustomBlending,
+                  blendSrc: THREE.OneFactor,
+                  blendDst: THREE.OneFactor,
+                  depthWrite: false,
+                  transparent: true,
+                }
+              : {}),
+          });
+
+          const plate = new THREE.Mesh(geometry, material);
+          plate.layers.set(spaced ? LAYER.screen : LAYER.solid);
+          plate.userData = { part, name: group.name, thickness, spaced, module: isModule, optic: isOptic };
+          parent.add(plate);
+          plates.push(plate);
+
+          // A screen is counted where the vehicle stands behind it, but it is
+          // also a shape in its own right: a track reaching past the hull would
+          // otherwise be a hole in the silhouette. This twin draws that shape,
+          // writing no depth so the vehicle paints over it.
+          if (spaced) {
+            const shape = new THREE.Mesh(
+              geometry,
+              new THREE.ShaderMaterial({
+                vertexShader: VERTEX,
+                fragmentShader: SCREEN_SHAPE,
+                uniforms: { thickness: { value: TRACK.test(group.name) ? -1 : (thickness ?? 0) } },
+                side: THREE.FrontSide,
+              }),
+            );
+            shape.layers.set(LAYER.shape);
+            parent.add(shape);
+            shapePlates.push(shape);
+          }
+        }
+      }
+
+      const compose = new THREE.Mesh(
+        new THREE.PlaneGeometry(2, 2),
+        new THREE.ShaderMaterial({
+          vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+          fragmentShader: COMPOSE,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+          uniforms: {
+            gathered: { value: gather.texture },
+            screenShapes: { value: shapes.texture },
+            gatheredDepth: { value: gather.depthTexture },
+            screenDepth: { value: shapes.depthTexture },
+            penetration: shotUniforms.penetration,
+            byThickness: shotUniforms.byThickness,
+            rampNone: { value: swatch(RAMP.none) },
+            rampEven: { value: swatch(RAMP.even) },
+            rampAlways: { value: swatch(RAMP.always) },
+            colourRicochet: { value: swatch(OUTCOME.ricochet.colour) },
+            colourOvermatch: { value: swatch(OUTCOME.overmatch.colour) },
+            armourRange: { value: new THREE.Vector2(armourRange[0], armourRange[1]) },
+            colourModule: { value: swatch(NOT_ARMOUR) },
+            colourOptics: { value: swatch(OPTICS) },
+            colourUnknown: { value: swatch(NOT_ARMOUR) },
+          },
+        }),
+      );
+      const overlay = new THREE.Scene();
+      overlay.add(compose);
+      const flat = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+      // Frame the vehicle rather than guessing a distance that suits one tier.
+      const bounds = new THREE.Box3();
+      for (const p of plates) if (!p.userData.part.startsWith("Gun")) bounds.expandByObject(p);
+      const centre = bounds.getCenter(new THREE.Vector3());
+      // Far enough back that the whole vehicle fits whatever its tier, and off
+      // to one side so a face and a flank are both in view, which is the angle
+      // an armour model is read from.
+      const radius = bounds.getSize(new THREE.Vector3()).length() / 2;
+      const fit = 1.25 * radius / Math.sin((camera.fov * Math.PI) / 360);
+      const towards = new THREE.Vector3(0.42, 0.3, 0.86).normalize();
+      controls.target.copy(centre);
+      camera.position.copy(centre).addScaledVector(towards, fit);
+      resize();
+      controls.update();
+
+      const guns = ammo?.guns ?? [];
+      let gun = guns.length - 1;
+      let chosen = 0;
+      let showScreens = true;
+      let tracking = true;
+      let rolling = true;
+      /** Which of the client's two texture sets to draw with. High by default. */
+      let definition = params.get("definition") === "sd" ? "sd" : "hd";
+
+      /**
+       * Which 3D style is on, and which the vehicle has.
+       *
+       * A style is published as a folder beside the vehicle holding a complete
+       * set of pieces, so switching to one is loading a different path rather
+       * than swapping a texture. Only the vehicle's own model lists them, so
+       * the list is kept here once it has been seen: a style's model does not
+       * know about its siblings.
+       */
+      let skin = params.get("skin") ?? null;
+      let skins = [];
+
+      /**
+       * The styles the vehicle has, asked of the vehicle itself.
+       *
+       * Only its own model lists them: a style's model has no idea it has
+       * siblings. Taking the list from whatever happened to load meant that
+       * opening the page straight onto a style left the picker empty, with no
+       * way back to the others.
+       */
+      async function findSkins() {
+        try {
+          const model = await (await fetch(fresh(`${ROOT}/vehicles/${VEHICLE}/model.json`))).json();
+          skins = model.skins ?? [];
+        } catch {
+          skins = [];
+        }
+      }
+
+      /** The path a style lives at, or the vehicle's own. */
+      const wearing = () => (skin ? `${VEHICLE}/_skins/${skin}` : VEHICLE);
+
+      /**
+       * The client's name for a style, made readable.
+       *
+       * `R45_IS_7_3DSt_HW_21` is the folder, not a name. The real ones live in
+       * the customization data, which is a different package: until that is
+       * mirrored this at least drops the vehicle's own code and the `3DSt` the
+       * client puts on every one of them.
+       */
+      const styleName = (raw) =>
+        raw
+          .replace(/^R\d+_/, "")
+          .replace(/IS[_-]?7[_-]?/i, "")
+          .replace(/_?3D?St_?/i, " ")
+          .replace(/_/g, " ")
+          .trim() || raw;
+      /**
+       * The 2D style on the vehicle, and the ones it is offered.
+       *
+       * Unlike a 3D style this repaints rather than reloads: the pieces and
+       * their textures are the same, and only a handful of uniforms change, so
+       * switching one costs nothing and needs no rebuild.
+       */
+      let style2d = null;
+      let season = "summer";
+      let styles2d = [];
+
+      /**
+       * How many marks of excellence are on the gun.
+       *
+       * A mark is projected onto the barrel rather than painted into a texture,
+       * so this is geometry: changing it rebuilds a decal, which is why it is
+       * kept here and put back after any rebuild.
+       */
+      let marks = 0;
+
+      async function findStyles() {
+        const at = visual?.styles;
+        if (!at) return;
+        try {
+          styles2d = await (await fetch(fresh(`${ROOT}/vehicles/${wearing()}/${at}`))).json();
+        } catch {
+          styles2d = [];
+        }
+      }
+
+      let view = Object.values(VIEW).includes(params.get("view")) ? params.get("view") : VIEW.live;
+      /** The textured model, built the first time it is asked for. */
+      let visual = null;
+      let building = false;
+      const shellsOf = () => guns[gun]?.shells ?? [];
+      const pretty = (name) => String(name).replace(/_/g, " ").replace(/^(\d+)mm/, "$1 mm");
+
+      async function useView(next) {
+        view = next;
+        shotUniforms.byThickness.value = view === VIEW.collision ? 1 : 0;
+        const showing = view === VIEW.visual;
+        // The collision shell and the model it stands for are the same tank, so
+        // only one of them is ever on screen.
+        for (const plate of plates) plate.visible = !showing;
+        for (const shape of shapePlates) shape.visible = !showing;
+        drawShells();
+        drawLegend();
+
+        if (showing && !visual && !building) {
+          building = true;
+          document.getElementById("readout").innerHTML = `<h2>Model</h2><div class="hint">Loading the tank…</div>`;
+          const { loadVisual } = await import("./visual.js");
+          visual = await loadVisual({
+            renderer,
+            scene,
+            root: ROOT,
+            vehicle: wearing(),
+            mounts: { scene: vehicle, hull: hullGroup, turret: turretGroup, gun: gunGroup },
+            definition,
+            fresh,
+          });
+          building = false;
+          // The panel is drawn before the model has loaded, so it is drawn
+          // again once the styles are known: `drawShells` owns that panel,
+          // whatever its name suggests.
+          // A repaint survives a rebuild: switching HD for SD builds the
+          // vehicle again, and coming back undressed would look like the
+          // camouflage had failed rather than been dropped.
+          // A repaint survives a rebuild: switching HD for SD builds the
+          // vehicle again, and coming back undressed would look like the style
+          // had failed rather than been dropped.
+          if (style2d) await visual.wear(style2d, season);
+          if (marks) await visual.mark(marks);
+          if (skins.length === 0 || styles2d.length === 0) {
+            await findSkins();
+            await findStyles();
+            drawShells();
+          }
+          if (view !== VIEW.visual) visual.show(false);
+        }
+        if (visual) visual.show(showing);
+        if (showing) describeModel();
+        // The armour panels answer about a point on the tank, so leaving the
+        // model behind leaves the invitation to point at one.
+        else document.getElementById("readout").innerHTML = `<h2>Impact</h2><div class="hint">Point at the tank.</div>`;
+      }
+
+      function describeModel() {
+        document.getElementById("readout").innerHTML =
+          `<h2>Model</h2>` +
+          `<div class="row"><span class="k">pieces</span><span class="v">${visual.pieces.length}</span></div>` +
+          `<div class="row"><span class="k">triangles</span><span class="v">${Math.round(visual.triangles).toLocaleString()}</span></div>` +
+          (visual.links ? `<div class="row"><span class="k">track links</span><span class="v">${visual.links}</span></div>` : "");
+      }
+
+      function useShell() {
+        const s = shellsOf()[chosen];
+        if (s) {
+          // A shell's two published penetrations are the ones at a hundred and
+          // at five hundred metres. The game reads between them and holds the
+          // far value beyond, so a shot across a map bites less than one taken
+          // point blank but never worse than one at five hundred.
+          const [near, far] = s.penetration;
+          const t = Math.min(Math.max(shot.range - 100, 0) / 400, 1);
+          Object.assign(shot, {
+            name: pretty(s.name),
+            kind: s.kind,
+            penetration: near + (far - near) * t,
+            caliber: s.caliber,
+            normalisation: s.normalization,
+            ricochet: s.ricochet,
+            maxDistance: s.maxDistance,
+            damage: s.damage,
+            calibreRules: SOLID_SHOT.test(s.kind),
+          });
+          shotUniforms.penetration.value = shot.penetration;
+          shotUniforms.caliber.value = shot.caliber;
+          shotUniforms.normalisation.value = shot.normalisation;
+          shotUniforms.ricochetAngle.value = shot.ricochet;
+          shotUniforms.calibreRules.value = shot.calibreRules ? 1 : 0;
+        }
+        drawShells();
+      }
+
+      function drawShells() {
+        const list = shellsOf();
+        const panel = document.getElementById("shells");
+        const title = VEHICLE.split("/")[1].replace(/^[A-Za-z]+\d+_/, "").replace(/_/g, " ");
+        const picker =
+          `<div class="views">` +
+          [
+            [VIEW.live, "Live", "what this shell would do"],
+            [VIEW.collision, "Collision", "how thick the plate is"],
+            [VIEW.visual, "Visual", "the tank as the game draws it"],
+          ]
+            .map(([key, label, why]) => `<button class="view${view === key ? " on" : ""}" data-view="${key}" title="${why}">${label}</button>`)
+            .join("") +
+          `</div>`;
+        const wire = () => {
+          // Both pickers are drawn as the same kind of button, so this one has
+          // to claim only the ones carrying a view.
+          panel.querySelectorAll("[data-view]").forEach((el) =>
+            el.addEventListener("click", () => useView(el.dataset.view)),
+          );
+          panel.querySelectorAll("[data-skin]").forEach((el) =>
+            el.addEventListener("click", async () => {
+              const wanted = el.dataset.skin || null;
+              if (wanted === skin || building) return;
+              skin = wanted;
+              // **The two kinds of style do not combine.** A 3D style is a
+              // complete look with pieces of its own, and the game does not let
+              // a player paint over one, so putting one on takes the 2D style
+              // off rather than leaving a choice standing that cannot apply.
+              style2d = null;
+              styles2d = [];
+              // A style is a different set of pieces, so the old one comes off
+              // the scene before the new one goes on.
+              visual?.dispose();
+              visual = null;
+              await useView(VIEW.visual);
+            }),
+          );
+          panel.querySelector("#style2d")?.addEventListener("change", (e) => {
+            const id = Number(e.target.value);
+            style2d = e.target.value ? styles2d.find((x) => x.id === id) ?? null : null;
+            visual?.wear(style2d, season);
+            drawShells();
+          });
+          panel.querySelectorAll("[data-marks]").forEach((el) =>
+            el.addEventListener("click", async () => {
+              marks = Number(el.dataset.marks);
+              await visual?.mark(marks);
+              drawShells();
+            }),
+          );
+          panel.querySelectorAll("[data-season]").forEach((el) =>
+            el.addEventListener("click", () => {
+              season = el.dataset.season;
+              visual?.wear(style2d, season);
+              drawShells();
+            }),
+          );
+          panel.querySelectorAll("[data-def]").forEach((el) =>
+            el.addEventListener("click", () => {
+              definition = el.dataset.def;
+              visual?.define(definition);
+              drawShells();
+            }),
+          );
+          panel.querySelector("#rolling")?.addEventListener("change", (e) => {
+            rolling = e.target.checked;
+          });
+          panel.querySelector("#track")?.addEventListener("change", (e) => {
+            tracking = e.target.checked;
+            if (!tracking) {
+              turretGroup.rotation.y = 0;
+              gunGroup.rotation.x = 0;
+            }
+          });
+        };
+
+        // Reading the plate itself needs no shell, so the ammunition goes away
+        // rather than sitting there implying it still matters.
+        if (view === VIEW.visual) {
+          panel.innerHTML =
+            `<h2>${title}</h2>${picker}` +
+            `<div class="hint">The vehicle's own model, textures and track.</div>` +
+            (visual?.hasHd === false
+              ? `<div class="hint" style="margin-top:6px">Only the standard textures are mirrored for this one.</div>`
+              : `<div class="views" style="margin-top:9px">` +
+                [
+                  ["hd", "HD", "the client's high-definition textures"],
+                  ["sd", "SD", "the standard set, a quarter of the pixels"],
+                ]
+                  .map(([key, label, why]) => `<button class="view${definition === key ? " on" : ""}" data-def="${key}" title="${why}">${label}</button>`)
+                  .join("") +
+                `</div>`) +
+            // The vehicle's 3D styles. Each is a complete set of pieces with
+            // textures of its own, so this reloads rather than repaints.
+            (skins.length > 0
+              ? `<hr><div class="hint">3D style</div><div class="views" style="margin-top:6px;flex-wrap:wrap">` +
+                [[null, "Default", "the vehicle as it comes"], ...skins.map((s) => [s, styleName(s), s])]
+                  .map(([key, label, why]) => `<button class="view${skin === key ? " on" : ""}" data-skin="${key ?? ""}" title="${why}">${label}</button>`)
+                  .join("") +
+                `</div>`
+              : "") +
+            // The 2D styles. There are seven hundred of them on a tier ten, far
+            // past what a row of buttons can hold, so this is the one control
+            // that can carry that many and still be typed at.
+            // Only on the vehicle's own model: a 3D style already is a
+            // complete look and cannot be painted over.
+            (styles2d.length > 0 && !skin
+              ? `<hr><div class="hint">2D style</div>` +
+                `<select id="style2d">` +
+                `<option value=""${style2d ? "" : " selected"}>None</option>` +
+                styles2d
+                  .map(
+                    (x) =>
+                      `<option value="${x.id}"${style2d?.id === x.id ? " selected" : ""}>${x.name}</option>`,
+                  )
+                  .join("") +
+                `</select>` +
+                // A style is painted for a season, and most carry all three.
+                // The row only appears where there is a choice to make.
+                (style2d && style2d.outfits.length > 1
+                  ? `<div class="views" style="margin-top:7px">` +
+                    style2d.outfits
+                      .map(
+                        (o) =>
+                          `<button class="view${season === o.season ? " on" : ""}" data-season="${o.season}">${o.season === "ALL" ? "any" : o.season}</button>`,
+                      )
+                      .join("") +
+                    `</div>`
+                  : "")
+              : "") +
+            // The marks of excellence sit on the gun rather than in the paint,
+            // so they are their own row whatever style is on.
+            (visual?.marksAvailable > 0
+              ? `<hr><div class="hint">Marks of excellence</div><div class="views" style="margin-top:6px">` +
+                [0, 1, 2, 3]
+                  .slice(0, visual.marksAvailable + 1)
+                  .map((n) => `<button class="view${marks === n ? " on" : ""}" data-marks="${n}">${n === 0 ? "none" : n}</button>`)
+                  .join("") +
+                `</div>`
+              : "") +
+            `<hr><label class="opt"><input type="checkbox" id="track"${tracking ? " checked" : ""}> the tank aims back at you</label>` +
+            `<label class="opt"><input type="checkbox" id="rolling"${rolling ? " checked" : ""}> keep the tracks running</label>`;
+          wire();
+          return;
+        }
+        if (view === VIEW.collision || list.length === 0) {
+          panel.innerHTML =
+            `<h2>${title}</h2>${picker}` +
+            (view === VIEW.collision
+              ? `<div class="hint">Every plate at its face value, whatever is shot at it.</div>`
+              : `<div class="hint">No ammunition loaded.</div>`) +
+            `<hr><label class="opt"><input type="checkbox" id="track"${tracking ? " checked" : ""}> the tank aims back at you</label>`;
+          wire();
+          return;
+        }
+        panel.innerHTML =
+          `<h2>${title}</h2>${picker}` +
+          list
+            .map(
+              (s, i) =>
+                `<div class="shell${i === chosen ? " on" : ""}" data-i="${i}">` +
+                `<span class="n">${pretty(s.name)}<br><span class="kind">${s.kind.replace(/_/g, " ").toLowerCase()}</span></span>` +
+                `<span class="p">${Math.round(i === chosen ? shot.penetration : s.penetration[0])}<span class="kind"> mm</span></span></div>`,
+            )
+            .join("") +
+          `<hr><div class="row"><span class="k">range</span><span class="v">${Math.round(shot.range)} m</span></div>` +
+          `<input type="range" id="range" min="100" max="${shot.maxDistance}" step="10" value="${shot.range}">` +
+          `<div class="row"><span class="k">calibre</span><span class="v">${shot.caliber} mm</span></div>` +
+          `<div class="row"><span class="k">normalises</span><span class="v">${shot.normalisation}°</span></div>` +
+          `<div class="row"><span class="k">ricochets past</span><span class="v">${shot.ricochet >= 90 ? "never" : `${shot.ricochet}°`}</span></div>` +
+          `<hr><label class="opt"><input type="checkbox" id="screens"${showScreens ? " checked" : ""}> count screens and tracks</label>` +
+          `<label class="opt"><input type="checkbox" id="track"${tracking ? " checked" : ""}> the tank aims back at you</label>`;
+        panel.querySelectorAll(".shell").forEach((el) =>
+          el.addEventListener("click", () => {
+            chosen = Number(el.dataset.i);
+            useShell();
+          }),
+        );
+        panel.querySelector("#range")?.addEventListener("input", (e) => {
+          shot.range = Number(e.target.value);
+          useShell();
+        });
+        panel.querySelector("#screens")?.addEventListener("change", (e) => {
+          showScreens = e.target.checked;
+        });
+        wire();
+      }
+
+      const hex = (c) => `#${c.toString(16).padStart(6, "0")}`;
+      /** Black on a bright badge, white on a dark one, so it stays readable. */
+      const ink = (c) =>
+        (((c >> 16) & 255) * 299 + ((c >> 8) & 255) * 587 + (c & 255) * 114) / 1000 > 140 ? "#06080c" : "#ffffff";
+
+      const screenScale =
+        `<div class="ramp" style="margin-top:7px;background:linear-gradient(to right, hsl(200,100%,50%), hsl(260,100%,50%), hsl(320,100%,50%))"></div>` +
+        `<div class="ends"><span>a heavy screen</span><span>a bare skirt</span></div>` +
+        `<div><span class="sw" style="background:${hex(NOT_ARMOUR)}"></span>a module or a track, not armour</div>` +
+        `<div><span class="sw" style="background:${hex(OPTICS)}"></span>an observation device</div>`;
+
+      function drawLegend() {
+        const legend = document.getElementById("legend");
+        legend.style.display = view === VIEW.visual ? "none" : "";
+        if (view === VIEW.visual) return;
+        const thickest = Math.round(armourRange[1]);
+        const thinnest = Math.round(armourRange[0]);
+        legend.innerHTML =
+          `<h2>Reading</h2>` +
+          (view === VIEW.collision
+            ? `<div class="ramp" style="background:linear-gradient(to right, hsl(120,100%,50%), hsl(60,100%,50%), hsl(0,100%,50%))"></div>` +
+              `<div class="ends"><span>${thinnest} mm</span><span>${thickest} mm</span></div>`
+            : `<div class="ramp" style="background:linear-gradient(to right, ${hex(RAMP.none)}, ${hex(RAMP.even)}, ${hex(RAMP.always)})"></div>` +
+              `<div class="ends"><span>never gets through</span><span>always does</span></div>` +
+              [OUTCOME.ricochet, OUTCOME.overmatch]
+                .map((o) => `<div><span class="sw" style="background:${hex(o.colour)}"></span>${o.label}</div>`)
+                .join("")) +
+          screenScale;
+      }
+
+      useView(view);
+      useShell();
+
+      /** The ramp colour for a given chance of getting through. */
+      function onRamp(odds) {
+        const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+        const parts = (c) => [(c >> 16) & 255, (c >> 8) & 255, c & 255];
+        const [from, to, t] =
+          odds > 0.5 ? [RAMP.even, RAMP.always, (odds - 0.5) * 2] : [RAMP.none, RAMP.even, odds * 2];
+        const [a, b] = [parts(from), parts(to)];
+        return (lerp(a[0], b[0], t) << 16) | (lerp(a[1], b[1], t) << 8) | lerp(a[2], b[2], t);
+      }
+
+      /** What the game works out at one plate, in millimetres of steel. */
+      function resolve(thickness, angle) {
+        // An opening: no steel to straighten against, turn away or overmatch.
+        if (thickness <= 0) return { ricochet: false, effective: 0, straighten: 0, overmatch: false, opening: true };
+        let straighten = shot.normalisation;
+        if (shot.calibreRules && shot.caliber > 2 * thickness) straighten *= (1.4 * shot.caliber) / (2 * thickness);
+        const overmatch = shot.calibreRules && shot.caliber >= 3 * thickness;
+        if (!overmatch && angle >= shot.ricochet) return { ricochet: true, effective: Infinity, straighten, overmatch };
+        const left = Math.max(angle - straighten, 0);
+        return { ricochet: false, effective: thickness / Math.max(Math.cos((left * Math.PI) / 180), 0.02), straighten, overmatch };
+      }
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.layers.enableAll();
+      const pointer = new THREE.Vector2();
+      const normalMatrix = new THREE.Matrix3();
+      let hovering = false;
+
+      renderer.domElement.addEventListener("pointermove", (e) => {
+        pointer.x = (e.clientX / innerWidth) * 2 - 1;
+        pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+        hovering = true;
+      });
+      renderer.domElement.addEventListener("pointerleave", () => {
+        hovering = false;
+        document.getElementById("readout").innerHTML = `<h2>Impact</h2><div class="hint">Point at the tank.</div>`;
+      });
+
+      function readout() {
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObjects(plates, false);
+        const direction = raycaster.ray.direction;
+
+        // Walk the shot in. Every surface it enters through is a layer, and a
+        // screen only adds its thickness to what stands behind it, so the walk
+        // ends at the first plate belonging to the vehicle itself: that is
+        // where the shell either stops or does its damage.
+        const layers = [];
+        for (const hit of hits) {
+          const normal = hit.face.normal.clone().applyMatrix3(normalMatrix.getNormalMatrix(hit.object.matrixWorld)).normalize();
+          if (normal.dot(direction) >= 0) continue; // a face turned away is the way out, not the way in
+          const { thickness, name, spaced, module } = hit.object.userData;
+          if (spaced && !showScreens) continue;
+          const angle = (Math.acos(Math.min(Math.abs(normal.dot(direction)), 1)) * 180) / Math.PI;
+          layers.push({ name, angle, thickness, spaced, module, optic: hit.object.userData.optic });
+          if (!spaced) break;
+        }
+
+        const panel = document.getElementById("readout");
+        if (layers.length === 0) {
+          panel.innerHTML = `<h2>Impact</h2><div class="hint">Nothing under the cursor.</div>`;
+          return;
+        }
+
+        // Reading the plate itself: its thickness and the angle it presents,
+        // with no shell involved.
+        if (view === VIEW.collision) {
+          panel.innerHTML =
+            `<h2>Plates</h2>` +
+            layers
+              .map((l) =>
+                `<div class="layer"><span>${l.name}${l.spaced ? ' <span class="t">screen</span>' : ""}</span>` +
+                (l.thickness === null
+                  ? `<span class="t">${l.optic ? "an observation device" : l.module ? "module" : "no thickness"}</span>`
+                  : `<span class="t"><b style="color:#fff">${l.thickness}</b> mm at ${l.angle.toFixed(0)}°</span>`) +
+                `</div>`,
+              )
+              .join("") +
+            `<hr><div class="row"><span class="k">this vehicle</span><span class="v">${Math.round(armourRange[0])}–${Math.round(armourRange[1])} mm</span></div>`;
+          return;
+        }
+
+        let total = 0;
+        let ricochet = false;
+        let armour = false;
+        let overmatched = false;
+        const lines = [];
+        for (const layer of layers) {
+          if (layer.module || layer.thickness === null) {
+            lines.push(
+              `<div class="layer"><span>${layer.name}</span><span class="t">${
+                layer.optic ? "an observation device" : layer.module ? "module" : "no thickness"
+              }</span></div>`,
+            );
+            continue;
+          }
+          const step = resolve(layer.thickness, layer.angle);
+          const note = layer.spaced ? ` <span class="t">screen</span>` : "";
+          if (step.ricochet) {
+            ricochet = true;
+            lines.push(`<div class="layer"><span>${layer.name}${note}</span><span class="t">${layer.thickness} mm at ${layer.angle.toFixed(0)}° · ricochet</span></div>`);
+            break;
+          }
+          if (!layer.spaced) {
+            // Only a plate of the vehicle itself settles the shot. A stack that
+            // is nothing but screens has not reached anything to damage.
+            armour = true;
+            overmatched = step.overmatch;
+          }
+          total += step.effective;
+          lines.push(
+            `<div class="layer"><span>${layer.name}${note}</span>` +
+              (step.opening
+                ? `<span class="t">an opening, no armour</span>`
+                : `<span class="t">${layer.thickness} mm at ${layer.angle.toFixed(0)}°${step.overmatch ? " · overmatch" : ""} → <b style="color:#fff">${Math.round(step.effective)}</b></span>`) +
+              `</div>`,
+          );
+        }
+
+        const low = shot.penetration * (1 - SPREAD);
+        const high = shot.penetration * (1 + SPREAD);
+        // How much of the roll gets through, which is what a player is really
+        // asking: not whether it can, but how often it does.
+        const odds = ricochet || !armour ? null : Math.min(Math.max((high - total) / (high - low), 0), 1);
+        const screensOnly = !armour && layers.some((l) => l.spaced);
+        const outcome = ricochet
+          ? OUTCOME.ricochet
+          : screensOnly
+            ? OUTCOME.screen
+            : !armour
+              ? OUTCOME.module
+              : overmatched
+                ? OUTCOME.overmatch
+                : { colour: onRamp(odds), label: "" };
+
+        panel.innerHTML =
+          `<h2>Impact</h2>` +
+          lines.join("") +
+          `<hr>` +
+          (armour
+            ? `<div class="row"><span class="k">effective</span><span class="v">${Math.round(total)} mm</span></div>` +
+              `<div class="row"><span class="k">penetration</span><span class="v">${Math.round(low)}–${Math.round(high)} mm</span></div>`
+            : "") +
+          `<div style="margin-top:9px"><span class="verdict" style="background:${hex(outcome.colour)};color:${ink(outcome.colour)}">${
+            odds === null || overmatched
+              ? `${outcome.label}${odds === null ? "" : ` · ${Math.round(odds * 100)}% get through`}`
+              : `${Math.round(odds * 100)}% of shots get through`
+          }</span></div>`;
+      }
+
+      function draw() {
+        // One pass gathers the vehicle's own surfaces, a second adds every
+        // screen standing in front of them, and a third turns the sum into the
+        // colour a player reads. Doing it this way is what lets a track and the
+        // hull behind it answer as the one shot they really are.
+        renderer.setClearColor(0x000000, 0);
+
+        // The vehicle's own surfaces settle the depth, then every screen in
+        // front of them is added to what they have to stop.
+        renderer.setRenderTarget(gather);
+        renderer.clear(true, true, false);
+        camera.layers.set(LAYER.solid);
+        renderer.render(scene, camera);
+        if (showScreens) {
+          camera.layers.set(LAYER.screen);
+          renderer.render(scene, camera);
+        }
+
+        // The screens again, on their own, for the shape they have where the
+        // vehicle is not behind them.
+        renderer.setRenderTarget(shapes);
+        renderer.clear(true, true, false);
+        camera.layers.set(LAYER.shape);
+        renderer.render(scene, camera);
+
+        renderer.setRenderTarget(null);
+        renderer.setClearColor(0x0d0f13, 1);
+        renderer.clear(true, true, false);
+        camera.layers.enableAll();
+        renderer.render(grid, camera);
+        renderer.render(overlay, flat);
+      }
+
+      const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+      const pivot = new THREE.Vector3();
+      const toward = new THREE.Vector3();
+
+      // Point the vehicle's gun at whoever is looking at it, within the arc it
+      // really has. This is the state that matters: the armour a player meets is
+      // the armour of a tank that is aiming back.
+      function aimBack() {
+        turretGroup.getWorldPosition(pivot);
+        toward.copy(camera.position).sub(pivot);
+        let yaw = Math.atan2(toward.x, toward.z);
+        if (yawLimit) {
+          yaw = clamp(yaw, (yawLimit[0] * Math.PI) / 180, (yawLimit[1] * Math.PI) / 180);
+        }
+        turretGroup.rotation.y = yaw;
+
+        gunGroup.getWorldPosition(pivot);
+        toward.copy(camera.position).sub(pivot);
+        const flatReach = Math.hypot(toward.x, toward.z);
+        // Turning about X swings the muzzle down, which is the same direction
+        // the client counts pitch in, so its two limits go straight through.
+        const rise = -Math.atan2(toward.y, flatReach);
+        gunGroup.rotation.x = clamp(rise, (pitchLimit[0] * Math.PI) / 180, (pitchLimit[1] * Math.PI) / 180);
+      }
+
+      /**
+       * The Visual view's frame, with the ambient occluded.
+       *
+       * Without it the running gear comes out as bright as the roof of the
+       * hull, because nothing in a standard material knows that the track run
+       * is buried under a fender: the vehicle's own maps cover its plates and
+       * the track has none at all, and ambient light arrives from every
+       * direction unimpeded. Measured against a capture of the game, our tracks
+       * sat at 79% of the hull's brightness where the game has them at 21%, and
+       * the whole vehicle collapsed onto one tone.
+       *
+       * Built on first use and only for this view: the armour views draw their
+       * own answers through their own render targets and must not be touched.
+       */
+      // Declared before `resize` runs so a window change reaches it too.
+      function composer() {
+        if (!built) {
+          built = new EffectComposer(renderer);
+          // The clear colour goes to the pass rather than to the renderer:
+          // inside a composer the renderer's own is never consulted.
+          built.addPass(new RenderPass(grid, camera, null, new THREE.Color(), 1));
+          // The vehicle goes over the grid rather than replacing it.
+          const vehicle = new RenderPass(scene, camera);
+          vehicle.clear = false;
+          built.addPass(vehicle);
+          const occlusion = new GTAOPass(scene, camera, innerWidth, innerHeight);
+          // In metres, and a tank is metres across: this is the reach of a
+          // fender over the track beneath it, not a crease in a plate.
+          occlusion.updateGtaoMaterial({ radius: 0.45, distanceExponent: 1.0, thickness: 0.4, scale: 1.1 });
+          built.addPass(occlusion);
+          // The passes work in linear light, so tone mapping happens here
+          // instead of in the renderer, from the same settings.
+          built.addPass(new OutputPass());
+          built.setSize(innerWidth, innerHeight);
+          built.setPixelRatio(Math.min(devicePixelRatio, 2));
+          window.__composer = built;
+        }
+        return built;
+      }
+
+      let lastFrame = 0;
+      let travelled = 0;
+
+      function tick(now) {
+        const step = lastFrame ? Math.min((now - lastFrame) / 1000, 0.1) : 0;
+        lastFrame = now;
+        controls.update();
+        if (tracking) aimBack();
+        if (view === VIEW.visual) {
+          // A track that never moves reads as a decal. This is the idle crawl a
+          // garage shows: slow enough to be a detail rather than a distraction,
+          // and only for vehicles whose axles the mirror knows.
+          if (visual && visual.turns && rolling) {
+            travelled += step * 0.6;
+            visual.roll(travelled);
+          }
+          renderer.setRenderTarget(null);
+          renderer.setClearColor(0x0d0f13, 1);
+          camera.layers.enableAll();
+          const passes = composer();
+          // A composer tone maps everything it draws, the backdrop included, so
+          // the colour handed to the clearing pass is the one that comes out
+          // right **after** that: the intended shade taken back through the
+          // exposure. Left alone, this near-black arrives on screen as a pale
+          // blue-grey. Set here rather than at build time because the exposure
+          // is only known once a view has been chosen.
+          const undo = 1 / Math.max(renderer.toneMappingExposure, 0.001);
+          passes.passes[0].clearColor.setRGB(
+            BACKDROP[0] * undo,
+            BACKDROP[1] * undo,
+            BACKDROP[2] * undo,
+            THREE.LinearSRGBColorSpace,
+          );
+          passes.render();
+        } else {
+          if (hovering) readout();
+          draw();
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+
+      window.__view = (x, y, z) => { camera.position.set(x, y, z); controls.target.copy(centre); controls.update(); };
+      // Look at one spot on the vehicle rather than at the whole of it, with a
+      // narrow lens so the view is close to flat. The controls own the camera,
+      // so a look has to go through them or the next frame undoes it.
+      window.__look = (at, from, fov = 10) => {
+        camera.fov = fov;
+        camera.position.set(from[0], from[1], from[2]);
+        controls.target.set(at[0], at[1], at[2]);
+        camera.updateProjectionMatrix();
+        controls.update();
+        return { at, from, fov };
+      };
+      window.__aim = (x, y) => { pointer.set(x, y); hovering = true; readout(); return document.getElementById("readout").innerText; };
+      window.__shell = (i) => { chosen = i; useShell(); return shot.name; };
+      window.__screens = (on) => { showScreens = on; drawShells(); };
+      window.__probe = (x, y) => {
+        const buf = new Float32Array(4);
+        renderer.readRenderTargetPixels(gather, Math.round(x * gather.width), Math.round((1 - y) * gather.height), 1, 1, buf);
+        return { screens: buf[0], kind: buf[1], own: buf[2], facing: buf[3] };
+      };
+      /** The colour a pixel actually ends up, so clarity is measured not judged. */
+      window.__pixel = (x, y) => {
+        const gl = renderer.getContext();
+        const px = new Uint8Array(4);
+        gl.readPixels(
+          Math.round(x * gl.drawingBufferWidth),
+          Math.round((1 - y) * gl.drawingBufferHeight),
+          1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px,
+        );
+        return `#${[px[0], px[1], px[2]].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+      };
+      window.__three = THREE;
+      window.__renderer = renderer;
+      window.__camera = camera;
+      window.__plateList = plates;
+      window.__probeShapes = (x, y) => {
+        const buf = new Float32Array(4);
+        renderer.readRenderTargetPixels(shapes, Math.round(x * shapes.width), Math.round((1 - y) * shapes.height), 1, 1, buf);
+        return { kind: buf[1], thickness: buf[2], lift: buf[3] };
+      };
+      window.__scene = scene;
+      window.__layers = LAYER;
+      window.__counts = () => {
+        const n = { shape: 0, solid: 0, screen: 0, other: 0 };
+        scene.traverse((o) => {
+          if (!o.isMesh) return;
+          if (o.layers.test({ mask: 1 << LAYER.shape })) n.shape++;
+          else if (o.layers.test({ mask: 1 << LAYER.solid })) n.solid++;
+          else if (o.layers.test({ mask: 1 << LAYER.screen })) n.screen++;
+          else n.other++;
+        });
+        return n;
+      };
+      window.__plates = plates.length;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

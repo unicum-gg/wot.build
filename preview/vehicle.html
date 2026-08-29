@@ -1,0 +1,350 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>vehicle preview</title>
+    <style>
+      body { margin: 0; background: #0e1014; color: #cfd6e4; font: 13px system-ui; }
+      canvas { display: block; }
+      #hud { position: fixed; left: 12px; top: 12px; background: #0009; padding: 8px 10px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="hud">loading…</div>
+    <script type="importmap">
+      { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/" } }
+    </script>
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+      const params = new URLSearchParams(location.search);
+      // How high the chassis carries the hull. It lives in the vehicle's scripts
+      // rather than its geometry, so a viewer joins it in; without it the hull
+      // sinks below the tracks.
+      let HULL_HEIGHT = Number(params.get("hull") ?? "0");
+      const ROOT = params.get("root") ?? "/models";
+      const VEHICLE = params.get("v") ?? "russian/R03_BT-7";
+      const hud = document.getElementById("hud");
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0e1014);
+      const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.05, 200);
+      camera.position.set(6.5, 3.4, 7.5);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+      document.body.appendChild(renderer.domElement);
+
+      // A metallic surface has nothing to reflect without an environment, and
+      // renders black. This one is generated, so no asset has to be shipped.
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      // The generated room is a bright white box. Dimming it keeps metal
+      // reading as metal without washing the paint out.
+      scene.environmentIntensity = 0.35;
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0.9, 0);
+      controls.enableDamping = true;
+
+      scene.add(new THREE.HemisphereLight(0xc9d4e4, 0x3d3a33, 1.1));
+      const key = new THREE.DirectionalLight(0xfff4e2, 2.0);
+      key.position.set(5, 8, 6);
+      scene.add(key);
+      const fill = new THREE.DirectionalLight(0xc2d2ea, 0.45);
+      fill.position.set(-6, 4, -5);
+      scene.add(fill);
+      scene.add(new THREE.GridHelper(20, 20, 0x2a3350, 0x1b2035));
+
+      const textures = new THREE.TextureLoader();
+      const cache = new Map();
+      function texture(entry) {
+        if (!entry) return null;
+        if (!cache.has(entry.path)) {
+          const t = textures.load(`${ROOT}/${entry.path}`);
+          // The mirror stores UVs the way glTF reads them, top down.
+          t.flipY = false;
+          // A track's UVs run to 30 so its texture repeats along the run.
+          // three clamps by default, which smears the edge pixel over the
+          // whole belt instead of drawing the links.
+          t.wrapS = THREE.RepeatWrapping;
+          t.wrapT = THREE.RepeatWrapping;
+          t.colorSpace = entry.colorSpace === "srgb" ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+          t.anisotropy = 8;
+          cache.set(entry.path, t);
+        }
+        return cache.get(entry.path);
+      }
+
+      function material(spec) {
+        const maps = spec?.textures ?? {};
+        // The mirror already rewrites the client's gloss-metal texture into the
+        // metal-roughness layout, so it is sampled straight.
+        const surface = texture(maps.metallicGlossMap);
+        return new THREE.MeshStandardMaterial({
+          map: texture(maps.diffuseMap),
+          normalMap: texture(maps.normalMap),
+          aoMap: texture(maps.excludeMaskAndAOMap),
+          roughnessMap: surface,
+          metalnessMap: surface,
+          // Without these a track draws as a solid ribbon: its gaps are cut by
+          // an alpha test, and its far side only exists when both are drawn.
+          side: spec?.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+          alphaTest: spec?.alphaTest ?? 0,
+          roughness: 1,
+          metalness: 1,
+        });
+      }
+
+      // A vehicle ships several turrets and guns, one per module the player can
+      // mount. Only the first of each is shown, the way a stock loadout looks.
+      function chosen(pieces) {
+        const names = Object.keys(pieces).sort();
+        const first = (prefix) => names.find((n) => n.startsWith(prefix));
+        return [first("Hull"), first("Chassis"), first("Turret"), first("Gun")].filter(Boolean);
+      }
+
+      // The ribbon the chassis carries is the game's cheap stand-in for a track.
+      // It is hidden once the real links are laid along their path.
+      const RIBBON = /^track_/;
+
+      /** Total length of a closed path, and its cumulative distances. */
+      function measure(points) {
+        const steps = [0];
+        let total = 0;
+        for (let i = 0; i < points.length; i++) {
+          const a = points[i];
+          const b = points[(i + 1) % points.length];
+          total += Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+          steps.push(total);
+        }
+        return { total, steps };
+      }
+
+      /** Where a distance along the path falls, and which way the path runs there. */
+      function sample(points, steps, distance) {
+        let i = 0;
+        while (i < steps.length - 2 && steps[i + 1] < distance) i++;
+        const a = points[i % points.length];
+        const b = points[(i + 1) % points.length];
+        const span = steps[i + 1] - steps[i] || 1;
+        const t = (distance - steps[i]) / span;
+        const at = new THREE.Vector3(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
+        const along = new THREE.Vector3(b[0] - a[0], b[1] - a[1], b[2] - a[2]).normalize();
+        return { at, along };
+      }
+
+      /**
+       * Lay links along one side's path, the way the game does: a link every
+       * link-length, each turned to follow the path.
+       *
+       * A link is modelled with its centre guide on the low side, a single tooth
+       * a few centimetres wide, and its shoe with the grousers on the high side,
+       * spanning the full width. The guide has to point **into** the loop so it
+       * rides between the road wheels, which puts the shoe outwards: against the
+       * ground on the bottom run, skywards on the top one. So the link's own up
+       * axis faces out of the loop, and the belt turns over correctly at each end.
+       */
+      function layTrack(geometry, material, points, linkLength) {
+        const { total, steps } = measure(points);
+        const count = Math.max(1, Math.round(total / linkLength));
+        const spacing = total / count;
+        const mesh = new THREE.InstancedMesh(geometry, material, count);
+        const basis = new THREE.Matrix4();
+        const outward = new THREE.Vector3();
+        const side = new THREE.Vector3();
+        // Sliding every link by the same distance is how the game runs a track:
+        // the belt moves, the path does not.
+        const place = (offset) => {
+          for (let i = 0; i < count; i++) {
+            const { at, along } = sample(points, steps, (i * spacing + offset) % total);
+            outward.set(0, -along.z, along.y).normalize();
+            side.crossVectors(outward, along);
+            basis.makeBasis(side, outward, along).setPosition(at);
+            mesh.setMatrixAt(i, basis);
+          }
+          mesh.instanceMatrix.needsUpdate = true;
+        };
+        place(0);
+        return { mesh, count, place, total };
+      }
+
+      // A piece is modelled around its own origin, so it sits where the piece
+      // it hangs off says: a hull declares where its turret goes, a turret
+      // where its gun goes. A vehicle with two turrets numbers the joints.
+      function joint(piece, base, ordinal) {
+        const points = piece?.hardpoints ?? {};
+        return points[`${base}_${ordinal}`] ?? points[base] ?? [0, 0, 0];
+      }
+      const ordinalOf = (name) => Number(name.split("_")[1] ?? 1);
+
+      const loader = new GLTFLoader();
+      const model = await (await fetch(`${ROOT}/vehicles/${VEHICLE}/model.json`)).json();
+      if (Array.isArray(model.hullPosition)) HULL_HEIGHT = model.hullPosition[1];
+      const pieces = chosen(model.pieces);
+      let triangles = 0;
+
+      const hull = model.pieces[pieces.find((n) => n.startsWith("Hull"))];
+      const turretName = pieces.find((n) => n.startsWith("Turret"));
+      const turret = model.pieces[turretName];
+      const turretAt = turret ? joint(hull, "HP_turretJoint", ordinalOf(turretName)) : [0, 0, 0];
+      const gunAt = turret ? joint(turret, "HP_gunJoint", 1) : [0, 0, 0];
+
+      // The turret turns about its joint and the gun pitches about its own, so
+      // each hangs off a group placed at that joint rather than being dropped
+      // into the scene at a fixed offset. This is how the game articulates a
+      // vehicle, and it is what lets a viewer look at the armour from the angle
+      // a shell would actually arrive at.
+      const hullGroup = new THREE.Group();
+      hullGroup.position.set(0, HULL_HEIGHT, 0);
+      const turretGroup = new THREE.Group();
+      turretGroup.position.fromArray(turretAt);
+      const gunGroup = new THREE.Group();
+      gunGroup.position.fromArray(gunAt);
+      turretGroup.add(gunGroup);
+      hullGroup.add(turretGroup);
+      scene.add(hullGroup);
+
+      function parentFor(name) {
+        if (name.startsWith("Chassis")) return scene;
+        if (name.startsWith("Turret")) return turretGroup;
+        if (name.startsWith("Gun")) return gunGroup;
+        return hullGroup;
+      }
+
+      for (const name of pieces) {
+        const piece = model.pieces[name];
+        const gltf = await loader.loadAsync(`${ROOT}/vehicles/${VEHICLE}/${piece.glb}`);
+        // A mesh drawn with several materials arrives as several meshes, so the
+        // manifest's per-mesh lists are flattened into the same order.
+        const order = piece.meshes.flatMap((m) => m.materials);
+        let index = 0;
+        gltf.scene.traverse((o) => {
+          if (!o.isMesh) return;
+          o.material = material(model.materials[order[index++] ?? -1]);
+          // Occlusion samples the second UV set where the client ships one,
+          // and falls back to the first where it does not.
+          if (!o.geometry.getAttribute("uv1")) {
+            o.geometry.setAttribute("uv1", o.geometry.getAttribute("uv"));
+          }
+          triangles += o.geometry.index.count / 3;
+        });
+        parentFor(name).add(gltf.scene);
+      }
+
+      // The real track: one link repeated along the path the client ships.
+      const belts = [];
+      let links = 0;
+      if (model.tracks && model.pieces[model.tracks.segment]) {
+        const segment = model.pieces[model.tracks.segment];
+        const gltf = await loader.loadAsync(`${ROOT}/vehicles/${VEHICLE}/${segment.glb}`);
+        const source = [];
+        gltf.scene.traverse((o) => o.isMesh && source.push(o));
+        const order = segment.meshes.flatMap((m) => m.materials);
+        source.forEach((o, i) => {
+          if (!o.geometry.getAttribute("uv1")) o.geometry.setAttribute("uv1", o.geometry.getAttribute("uv"));
+          o.geometry.computeBoundingBox();
+          const length = o.geometry.boundingBox.max.z - o.geometry.boundingBox.min.z;
+          for (const path of Object.values(model.tracks.paths)) {
+            const laid = layTrack(o.geometry, material(model.materials[order[i] ?? -1]), path, length);
+            scene.add(laid.mesh);
+            belts.push(laid);
+            links += laid.count;
+            triangles += (o.geometry.index.count / 3) * laid.count;
+          }
+        });
+        scene.traverse((o) => { if (o.isMesh && RIBBON.test(o.name)) o.visible = false; });
+      }
+
+      hud.textContent =
+        `${VEHICLE} · ${pieces.join(" + ")} · ${triangles.toLocaleString()} triangles` +
+        (links ? ` · ${links} track links` : "");
+
+      // How far the gun may pitch, as the client states it: pairs of turret
+      // angle and limit, so a hull the gun cannot depress over reduces it only
+      // on that arc. Angles are degrees, negative being up.
+      const ELEVATION = JSON.parse(params.get("elevation") ?? "[0,-18,1,-18]");
+      const DEPRESSION = JSON.parse(params.get("depression") ?? "[0,6,0.311338,6,0.375,1,0.625,1,0.688662,6,1,6]");
+
+      /** The limit at a turret angle, interpolated between the client's pairs. */
+      function limitAt(table, turn) {
+        const at = ((turn % 1) + 1) % 1;
+        for (let i = 0; i + 3 < table.length; i += 2) {
+          if (at >= table[i] && at <= table[i + 2]) {
+            const span = table[i + 2] - table[i] || 1;
+            const t = (at - table[i]) / span;
+            return table[i + 1] + (table[i + 3] - table[i + 1]) * t;
+          }
+        }
+        return table[1];
+      }
+
+      // The road wheels the client skins the chassis to. Turning them is what
+      // the skeleton in the .glb is there for.
+      const WHEEL = /^W_[LR]\d+_BlendBone$/;
+      const wheels = [];
+      scene.traverse((o) => {
+        if (!WHEEL.test(o.name)) return;
+        // A wheel turns about the axle it sits on, so its radius is how far its
+        // centre stands above the ground the track runs on.
+        const ground = Math.min(...Object.values(model.tracks?.paths ?? { a: [[0, 0, 0]] }).flat().map((p) => p[1]));
+        const centre = new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).y;
+        wheels.push({ bone: o, rest: o.quaternion.clone(), radius: Math.max(0.1, centre - ground) });
+      });
+
+      // Running the belts, the way the game does when the vehicle moves.
+      let travelled = 0;
+      const spin = new THREE.Quaternion();
+      const axis = new THREE.Vector3(1, 0, 0);
+      window.__roll = (metres) => {
+        travelled += metres;
+        for (const belt of belts) belt.place(((travelled % belt.total) + belt.total) % belt.total);
+        for (const wheel of wheels) {
+          spin.setFromAxisAngle(axis, travelled / wheel.radius);
+          wheel.bone.quaternion.copy(wheel.rest).multiply(spin);
+        }
+        return { travelled: +travelled.toFixed(2), wheels: wheels.length };
+      };
+      renderer.domElement.addEventListener("wheel", (e) => {
+        if (!e.shiftKey) return;
+        e.preventDefault();
+        window.__roll(e.deltaY * 0.01);
+      }, { passive: false });
+
+      let turn = 0;
+      let pitch = 0;
+      function aim(nextTurn, nextPitch) {
+        turn = nextTurn;
+        const up = limitAt(ELEVATION, turn / (Math.PI * 2));
+        const down = limitAt(DEPRESSION, turn / (Math.PI * 2));
+        pitch = Math.min(down, Math.max(up, nextPitch));
+        turretGroup.rotation.y = turn;
+        gunGroup.rotation.x = THREE.MathUtils.degToRad(pitch);
+      }
+      window.__aim = (degTurn, degPitch) => {
+        aim(THREE.MathUtils.degToRad(degTurn), degPitch);
+        return { turn: degTurn, pitch: +pitch.toFixed(2) };
+      };
+
+      function tick() {
+        controls.update();
+        renderer.render(scene, camera);
+        requestAnimationFrame(tick);
+      }
+      tick();
+      window.__view = (x, y, z, ty = 0.9) => {
+        camera.position.set(x, y, z);
+        controls.target.set(0, ty, 0);
+        controls.update();
+      };
+      window.__scene = scene;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

@@ -1,3 +1,13 @@
 node_modules/
 out/
 tools/
+# The scratch the pipeline was worked out in, kept on disk and off the mirror.
+# `onevehicle` is the exception: it is the tool a change is judged with, and
+# `generate-models` points at it by name.
+spike/*
+!spike/onevehicle.ts
+
+preview/models
+preview/probe
+preview/compare.html
+preview/theirs
