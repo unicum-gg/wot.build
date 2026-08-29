@@ -12,42 +12,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { decodePacked, type PackedNode } from "./packed.js";
+import { DECAL_SCALE_FACTORS, readDecals, readProjectionDecals, type StyleDecal, type StyleProjectionDecal } from "./decal.js";
+import { readPaints, regionsOf, repaint, StylePart, type StylePaint } from "./paint.js";
 import { offeredOn, readCamouflages, type CamouflageColor } from "./camouflage.js";
 import { readInsignia } from "./insignia.js";
 import { type VehicleIdentity } from "./script.js";
+import { child, children, text } from "./read.js";
 
-/**
- * The four parts of a vehicle a style paints, in the order the client's
- * `appliedTo` mask counts them. Each part owns four bits, one per region of it
- * that can be painted separately.
- */
-export enum StylePart {
-  Chassis = "chassis",
-  Hull = "hull",
-  Turret = "turret",
-  Gun = "gun",
-}
 
-const PART_ORDER = [StylePart.Chassis, StylePart.Hull, StylePart.Turret, StylePart.Gun];
-const REGIONS_PER_PART = 4;
 
-/**
- * The gun region that inherits nothing.
- *
- * The client calls it `C11N_MASK_REGION` and it is `GUN_2`, the muzzle. Every
- * other region falls back to the first region's colour when no paint names it;
- * this one falls back to the vehicle's default colour instead, which is why a
- * muzzle brake stays in the tank's own green under a style that repaints the
- * rest of the barrel.
- */
-const GUN_MASK_REGION = 2;
 
-export type StylePaint = {
-  color: CamouflageColor;
-  gloss: number;
-  metallic: number;
-  regions: Partial<Record<StylePart, number>>;
-};
 
 export type StyleCamouflage = {
   /** The pattern, as the client paths it. */
@@ -92,39 +66,7 @@ export type StyleCamouflage = {
   regions: Partial<Record<StylePart, number>>;
 };
 
-/**
- * A sticker or a line of lettering, projected into one of the vehicle's own
- * decal slots.
- *
- * Which slot it lands in comes from what it is rather than from where it is
- * pointed: the client keeps emblem slots and inscription slots apart on every
- * vehicle, and an emblem goes in an emblem slot.
- */
-export type StyleDecal = {
-  texture: string;
-  /** `emblem` or `inscription`, read from the key the client names it under. */
-  kind: string;
-  /** Whether the client mirrors it onto the vehicle's other side. */
-  mirror: boolean;
-  regions: Partial<Record<StylePart, number>>;
-};
 
-/**
- * A decal projected into one of the vehicle's own projection slots.
- *
- * Unlike an emblem, which the client places by casting a ray, this one carries
- * a box: the slot says where it sits, how it is turned and how big, and the
- * item says which slots it may go in by naming their tags. `safe left
- * formfactor_square` picks out one place on a vehicle and no other.
- */
-export type StyleProjectionDecal = {
-  texture: string;
-  /** The tags a slot must all carry for this to go in it. */
-  tags: string[];
-  /** One of the client's three sizes, already resolved. */
-  scale: number;
-  mirror: boolean;
-};
 
 export type StyleOutfit = {
   season: string;
@@ -175,17 +117,8 @@ export type Style2D = {
   outfits: StyleOutfit[];
 };
 
-function child(node: PackedNode | undefined, name: string): PackedNode | undefined {
-  return node?.children.find((c) => c.name === name);
-}
 
-function children(node: PackedNode | undefined, name: string): PackedNode[] {
-  return node?.children.filter((c) => c.name === name) ?? [];
-}
 
-function text(node: PackedNode | undefined): string {
-  return typeof node?.value === "string" ? node.value.trim() : "";
-}
 
 function numbers(node: PackedNode | undefined): number[] {
   if (!node) return [];
@@ -197,137 +130,12 @@ function numbers(node: PackedNode | undefined): number[] {
     .filter((n) => Number.isFinite(n));
 }
 
-/**
- * Which regions of which parts a mask lands on.
- *
- * **A part is not the unit.** Every piece is divided into up to four regions by
- * its own colour-id map, and `appliedTo` names regions rather than parts: a
- * camouflage that reads "hull, turret, gun" is usually region 1 of each. On a
- * piece whose map is the shared blank one that is the whole piece, which is why
- * reading it as parts looked right on a hull and left a gun barrel unpainted:
- * the gun is the one piece with a map of its own, and its barrel is a region of
- * its own within it.
- */
-function regionsOf(mask: number): Partial<Record<StylePart, number>> {
-  const out: Partial<Record<StylePart, number>> = {};
-  PART_ORDER.forEach((part, at) => {
-    const bits = (mask >> (at * REGIONS_PER_PART)) & ((1 << REGIONS_PER_PART) - 1);
-    if (bits !== 0) out[part] = bits;
-  });
-  return out;
-}
 
 
-/**
- * What every region of every part ends up painted.
- *
- * The rule is the client's own: a paint covers the regions it names and the
- * rest take the first region's colour. The gun's mask region is the one
- * exception and takes nothing.
- *
- * **An unpainted region stays unpainted.** The client fills it with the
- * nation's default and so did this, which is right for a client whose albedo is
- * authored neutral and wrong for ours, where the vehicle's own colour is
- * already in the texture: painting the default over it a second time turned
- * every French running gear a flat blue-grey under styles that carry no paint
- * at all. A region with no paint is returned with a zero alpha and the surface
- * keeps what it came with.
- */
-function repaint<T>(paints: StylePaint[], take: (paint: StylePaint) => T): Partial<Record<StylePart, T[]>> {
-  // What a region with no paint gets. The colour reads as fully transparent, so
-  // nothing is laid; the finish is the client's own default, which is what the
-  // surface keeps when nothing paints over it.
-  const bare = take({ color: { r: 0, g: 0, b: 0, a: 0 }, gloss: 0.509, metallic: 0.23, regions: {} });
-  const out: Partial<Record<StylePart, T[]>> = {};
-  for (const part of PART_ORDER) {
-    const named = (region: number) => {
-      const paint = paints.find((p) => ((p.regions[part] ?? 0) >> region) & 1);
-      return paint?.color ? take(paint) : undefined;
-    };
-    const first = named(0) ?? bare;
-    out[part] = [0, 1, 2, 3].map(
-      (region) => named(region) ?? (part === StylePart.Gun && region === GUN_MASK_REGION ? bare : first),
-    );
-  }
-  return out;
-}
 
-/** Every decal the client defines, by id. */
-function readDecals(dir: string): Map<number, { texture: string; kind: string; mirror: boolean }> {
-  const out = new Map<number, { texture: string; kind: string; mirror: boolean }>();
-  if (!fs.existsSync(dir)) return out;
-  const every = (node: PackedNode, into: PackedNode[] = []): PackedNode[] => {
-    for (const c of node.children) {
-      if (c.name === "decal") into.push(c);
-      else every(c, into);
-    }
-    return into;
-  };
-  for (const file of fs.readdirSync(dir).sort()) {
-    for (const decal of every(decodePacked(fs.readFileSync(path.join(dir, file))))) {
-      const id = Number(child(decal, "id")?.value ?? 0);
-      const texture = text(child(decal, "texture"));
-      if (!id || !texture || out.has(id)) continue;
-      // The key says what it is: `#vehicle_customization:emblem/...` against
-      // `#vehicle_customization:inscription/...`. Nothing else in the entry
-      // does, and the two go in different slots.
-      const key = text(child(decal, "userString"));
-      out.set(id, {
-        texture,
-        kind: key.includes("inscription") ? "inscription" : "emblem",
-        mirror: child(decal, "mirror")?.value === true || text(child(decal, "mirror")) === "true",
-      });
-    }
-  }
-  return out;
-}
 
-/** The three sizes a projection decal can be asked for, as the client lists them. */
-const DECAL_SCALE_FACTORS = [0.6, 0.8, 1.0];
 
-/** Every projection decal the client defines, by id. */
-function readProjectionDecals(dir: string): Map<number, { texture: string; mirror: boolean }> {
-  const out = new Map<number, { texture: string; mirror: boolean }>();
-  if (!fs.existsSync(dir)) return out;
-  const every = (node: PackedNode, into: PackedNode[] = []): PackedNode[] => {
-    for (const c of node.children) {
-      if (c.name === "projection_decal") into.push(c);
-      else every(c, into);
-    }
-    return into;
-  };
-  for (const file of fs.readdirSync(dir).sort()) {
-    for (const decal of every(decodePacked(fs.readFileSync(path.join(dir, file))))) {
-      const id = Number(child(decal, "id")?.value ?? 0);
-      const texture = text(child(decal, "texture"));
-      if (!id || !texture || out.has(id)) continue;
-      out.set(id, { texture, mirror: child(decal, "mirror")?.value === true || text(child(decal, "mirror")) === "true" });
-    }
-  }
-  return out;
-}
 
-/** Every paint the client defines, by id. */
-function readPaints(dir: string): Map<number, { color: CamouflageColor; gloss: number; metallic: number }> {
-  const out = new Map<number, { color: CamouflageColor; gloss: number; metallic: number }>();
-  if (!fs.existsSync(dir)) return out;
-  for (const file of fs.readdirSync(dir).sort()) {
-    const root = decodePacked(fs.readFileSync(path.join(dir, file)));
-    for (const group of root.children) {
-      for (const paint of children(group, "paint")) {
-        const id = Number(child(paint, "id")?.value ?? 0);
-        if (!id || out.has(id)) continue;
-        const [r = 0, g = 0, b = 0, a = 255] = numbers(child(paint, "color"));
-        out.set(id, {
-          color: { r, g, b, a },
-          gloss: Number(text(child(paint, "gloss")) || 0),
-          metallic: Number(text(child(paint, "metallic")) || 0),
-        });
-      }
-    }
-  }
-  return out;
-}
 
 /** Walk to every `<style>`, wherever a file nests it. */
 function everyStyle(node: PackedNode, into: PackedNode[] = []): PackedNode[] {
