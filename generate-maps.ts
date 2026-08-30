@@ -40,6 +40,11 @@ const ONLY = flag("--id");
 const PART = flag("--part");
 const FORCE = args.includes("--force");
 const ALL = args.includes("--all");
+// The markers are cut from the assets mirror, not from the client, so how they
+// are rendered can change while every published minimap stays valid. This
+// republishes that set alone, in seconds, instead of paying a full `--force`
+// re-extraction of every map to ship one new marker.
+const MARKERS_ONLY = args.includes("--markers");
 
 // A map lives in exactly one content part; `client` wins for the rare id in both.
 const PARTS = PART ? [PART] : ["client", "sdcontent"];
@@ -50,8 +55,16 @@ const NON_MAP = /(?:^|[/_-])(?:vehicles_level|shared_content|hangar)|_bin$|_edit
 
 // The markers are sprites inside the client's battle atlas, which `wot.assets`
 // already publishes, so they are read from there rather than re-extracted here.
-const ATLAS =
-  "https://raw.githubusercontent.com/unicum-gg/wot.assets/WG/gui/flash/atlases/battleAtlas";
+//
+// Two atlases, live first: a marker for a mode still in testing exists only in
+// the test client's atlas (the Onslaught illumination-flare point is in the
+// test one and not the live one), and the published set is a single region
+// agnostic folder, so a sprite the live atlas does not have is taken from the
+// test one rather than left out. The test atlas is only fetched when the live
+// one is missing a sprite.
+const ATLAS_REFS = ["WG", "WG_CT"];
+const atlasUrl = (ref: string) =>
+  `https://raw.githubusercontent.com/unicum-gg/wot.assets/${ref}/gui/flash/atlases/battleAtlas`;
 const MARKER_SCALE = 2; // 64px atlas sprites -> crisp 128px PNGs
 
 const log = (msg: string) => console.log(`[wot.maps] ${msg}`);
@@ -136,25 +149,55 @@ function parseAtlasXml(xml: string): Map<string, Rect> {
   return rects;
 }
 
+/** One decoded atlas sheet plus the sprite boxes it declares. */
+type Atlas = { rects: Map<string, Rect>; width: number; height: number; rgba: Buffer };
+
+/** A sprite together with the sheet it was found on. */
+type Sprite = { atlas: Atlas; rect: Rect };
+
+async function loadAtlas(ref: string): Promise<Atlas> {
+  const url = atlasUrl(ref);
+  const [xml, dds] = await Promise.all([
+    fetchText(`${url}.xml`),
+    fetchRange(`${url}.dds`),
+  ]);
+  const { width, height, rgba } = decodeDDS(dds);
+  return { rects: parseAtlasXml(xml), width, height, rgba };
+}
+
 async function generateMarkers(): Promise<void> {
   console.log("[wot.maps] extracting minimap markers from battleAtlas...");
-  const [xml, dds] = await Promise.all([
-    fetchText(`${ATLAS}.xml`),
-    fetchRange(`${ATLAS}.dds`),
-  ]);
-  const rects = parseAtlasXml(xml);
-  const { width, height, rgba } = decodeDDS(dds);
+  const loaded = new Map<string, Atlas>();
+  const atlasFor = async (ref: string): Promise<Atlas> => {
+    const hit = loaded.get(ref);
+    if (hit) return hit;
+    const atlas = await loadAtlas(ref);
+    loaded.set(ref, atlas);
+    return atlas;
+  };
+  // First atlas that declares the sprite, live before test.
+  const find = async (name: string): Promise<Sprite | null> => {
+    for (const ref of ATLAS_REFS) {
+      const atlas = await atlasFor(ref);
+      const rect = atlas.rects.get(name);
+      if (rect) return { atlas, rect };
+    }
+    return null;
+  };
   const markersDir = path.join(OUT, "markers");
   fs.mkdirSync(markersDir, { recursive: true });
   let ok = 0;
   const missing: string[] = [];
   for (const [name, sprite] of Object.entries(markerSprites())) {
-    const r = rects.get(sprite);
-    if (!r) {
+    const found = await find(sprite);
+    if (!found) {
       missing.push(sprite);
       continue;
     }
-    await sharp(rgba, { raw: { width, height, channels: 4 } })
+    const { atlas, rect: r } = found;
+    await sharp(atlas.rgba, {
+      raw: { width: atlas.width, height: atlas.height, channels: 4 },
+    })
       .extract({ left: r.x, top: r.y, width: r.w, height: r.h })
       .resize(r.w * MARKER_SCALE, r.h * MARKER_SCALE, { kernel: "lanczos3" })
       .png({ compressionLevel: 9 })
@@ -164,25 +207,28 @@ async function generateMarkers(): Promise<void> {
 
   // Onslaught points-of-interest markers: the `poiMarkerBack` disc (a neutral,
   // semi-transparent scrim the game colours per state) + a per-type glyph
-  // (`poiMarkerIcon_{type}`, 1 = strike, 2 = recon). We render the game's
+  // (`poiMarkerIcon_{type}`, the client's own `POI_CONSTS`: 1 = artillery
+  // strike, 2 = recon, 3 = illumination flare). We render the game's
   // "available/capturable" look: a solid white disc with the glyph darkened for
   // contrast, rather than the greyed-out captured state.
-  const crop = (r: Rect) =>
-    sharp(rgba, { raw: { width, height, channels: 4 } })
+  const crop = ({ atlas, rect: r }: Sprite) =>
+    sharp(atlas.rgba, {
+      raw: { width: atlas.width, height: atlas.height, channels: 4 },
+    })
       .extract({ left: r.x, top: r.y, width: r.w, height: r.h })
       .resize(r.w * MARKER_SCALE, r.h * MARKER_SCALE, { kernel: "lanczos3" });
   // Recolour a sprite: fill `rgb`, keep its shape, and boost its alpha (the disc
   // is only ~half opaque) so the fill reads solid.
   const recolour = async (
-    r: Rect,
+    s: Sprite,
     rgb: { r: number; g: number; b: number },
     alphaGain: number,
   ): Promise<Buffer> => {
-    const alpha = await crop(r).extractChannel(3).linear(alphaGain, 0).png().toBuffer();
+    const alpha = await crop(s).extractChannel(3).linear(alphaGain, 0).png().toBuffer();
     return sharp({
       create: {
-        width: r.w * MARKER_SCALE,
-        height: r.h * MARKER_SCALE,
+        width: s.rect.w * MARKER_SCALE,
+        height: s.rect.h * MARKER_SCALE,
         channels: 3,
         background: rgb,
       },
@@ -194,15 +240,16 @@ async function generateMarkers(): Promise<void> {
   const poiIcons: Record<string, string> = {
     poi_strike: "poiMarkerIcon_1",
     poi_recon: "poiMarkerIcon_2",
+    poi_flare: "poiMarkerIcon_3",
   };
   // A soft dark shadow of a sprite, so a white glyph stays legible on the white
   // disc (an all-white marker that still reads).
-  const shadow = async (r: Rect): Promise<Buffer> => {
-    const alpha = await crop(r).extractChannel(3).png().toBuffer();
+  const shadow = async (s: Sprite): Promise<Buffer> => {
+    const alpha = await crop(s).extractChannel(3).png().toBuffer();
     return sharp({
       create: {
-        width: r.w * MARKER_SCALE,
-        height: r.h * MARKER_SCALE,
+        width: s.rect.w * MARKER_SCALE,
+        height: s.rect.h * MARKER_SCALE,
         channels: 3,
         background: { r: 0, g: 0, b: 0 },
       },
@@ -212,9 +259,17 @@ async function generateMarkers(): Promise<void> {
       .png()
       .toBuffer();
   };
-  const back = rects.get("poiMarkerBack");
+  // The same sprite on a given sheet, so a glyph and its disc are always cut
+  // from one atlas rather than mixing a live disc with a test glyph.
+  const sameSheet = (s: Sprite, name: string): Sprite | null => {
+    const rect = s.atlas.rects.get(name);
+    return rect ? { atlas: s.atlas, rect } : null;
+  };
   for (const [name, iconName] of Object.entries(poiIcons)) {
-    const icon = rects.get(iconName);
+    const icon = await find(iconName);
+    const back = icon
+      ? (sameSheet(icon, "poiMarkerBack") ?? (await find("poiMarkerBack")))
+      : null;
     if (!back || !icon) {
       missing.push(name);
       continue;
@@ -236,6 +291,10 @@ async function generateMarkers(): Promise<void> {
   );
 }
 async function main(): Promise<void> {
+  if (MARKERS_ONLY) {
+    await generateMarkers();
+    return;
+  }
   log(`resolving ${GUID} via ${HOST}`);
   const client = await resolveClient(HOST, GUID);
   if (!client) {

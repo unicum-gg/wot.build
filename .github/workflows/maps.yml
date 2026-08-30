@@ -17,6 +17,13 @@ on:
         description: "Re-extract even when the client version is unchanged"
         type: boolean
         default: false
+      markers_only:
+        # The markers come from the assets mirror rather than from the client,
+        # so republishing a changed marker set does not need the hours a full
+        # re-extraction costs.
+        description: "Only republish the marker set, skipping the minimaps"
+        type: boolean
+        default: false
 
 concurrency:
   group: maps
@@ -73,7 +80,7 @@ jobs:
             "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
 
       - name: Generate (no-op if the client version is unchanged)
-        run: npm run maps -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out --all ${{ inputs.force && '--force' || '' }}
+        run: npm run maps -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out --all ${{ inputs.force && '--force' || '' }} ${{ inputs.markers_only && '--markers' || '' }}
 
       - name: Commit & push if changed
         working-directory: out
@@ -83,5 +90,5 @@ jobs:
             echo "no changes for ${{ matrix.branch }}"
             exit 0
           fi
-          git commit -m "🍱 update ${{ matrix.branch }} minimaps to $(cat .version_name)"
+          git commit -m "🍱 update ${{ matrix.branch }} ${{ inputs.markers_only && 'minimap markers' || 'minimaps' }} to $(cat .version_name)"
           git push origin "HEAD:${{ matrix.branch }}"
