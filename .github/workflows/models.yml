@@ -1,0 +1,102 @@
+name: models
+
+# Rebuilds the vehicle geometry and pushes it to `unicum-gg/wot.models`.
+#
+# The heaviest of the four: a run reads every package family, since a vehicle's
+# pieces are split across its tier's parts and the textures a nation shares live
+# in the shared ones. Measured at just under three hours and twenty gigabytes for
+# the release branch.
+#
+# **The first import of a branch cannot go through here.** A push is capped at
+# 2 GB and an empty branch takes the whole mirror at once, so a new branch is
+# seeded by hand in chunks; every run after that pushes only what a patch
+# changed, which is small.
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily, after sources, assets and maps
+  workflow_dispatch:
+    inputs:
+      force:
+        # The version guard skips a run whose client is already mirrored, which
+        # is right for a schedule and wrong right after this generator changes:
+        # the output would differ but the version does not.
+        description: "Re-extract even when the client version is unchanged"
+        type: boolean
+        default: false
+      skins:
+        # 237 vehicles declare 330 of them between them, each a full set of
+        # pieces with textures of its own, so they roughly double the mirror.
+        description: "Also publish the 3D styles"
+        type: boolean
+        default: false
+
+concurrency:
+  group: models
+  cancel-in-progress: false
+
+env:
+  TARGET: unicum-gg/wot.models
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    # A release branch measured 2h55. The ceiling is the six hours a job gets.
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - branch: WG
+            host: wgus-woteu.wargaming.net
+            guid: WOT.EU.PRODUCTION
+          - branch: WG_CT
+            host: wgus-wotct.wargaming.net
+            guid: WOT.CT.PRODUCTION
+          - branch: Lesta
+            host: lstus-ru.lesta.ru
+            guid: MT.RU.PRODUCTION
+          - branch: Lesta_PT
+            host: lstus-ru.lesta.ru
+            guid: MT.PT.PRODUCTION
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Free disk space
+        # The scratch tree holds a package family at a time and the output is
+        # twenty gigabytes, so the runner's own toolchains have to go.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Checkout the target branch
+        run: |
+          git config --global user.name "wot.build"
+          git config --global user.email "actions@users.noreply.github.com"
+          git clone --depth 1 --branch "${{ matrix.branch }}" \
+            "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
+
+      - name: Generate (no-op if the client version is unchanged)
+        run: npm run models -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out ${{ inputs.force && '--force' || '' }} ${{ inputs.skins && '--skins' || '' }}
+
+      - name: Commit & push if changed
+        working-directory: out
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes for ${{ matrix.branch }}"
+            exit 0
+          fi
+          git commit -m "🍱 update ${{ matrix.branch }} vehicle geometry to $(cat .version_name)"
+          git push origin "HEAD:${{ matrix.branch }}"
