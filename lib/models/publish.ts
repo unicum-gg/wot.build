@@ -14,8 +14,9 @@ import { readStyles, type Style2D } from "../style.js";
 import { patternWeights } from "../texture.js";
 import { texturePath } from "../material.js";
 import type { VehicleModel } from "../model.js";
+import { fold } from "./catalogue.js";
 import type { Measured } from "./convert.js";
-import type { Settings } from "./settings.js";
+import { log, type Settings } from "./settings.js";
 import type { Catalogue } from "./sweep.js";
 
 /** Write the accumulated collision and model files, returning what was written. */
@@ -78,6 +79,8 @@ export async function publish(
     return out.sort((a, b) => a.name.localeCompare(b.name));
   };
 
+  /** Every style the mirror publishes, written once at the root. */
+  const catalogue = new Map<number, Style2D>();
   let written = 0;
   let bytes = 0;
   for (const [key, entry] of vehicles) {
@@ -125,7 +128,10 @@ export async function publish(
         const styles = wearable(identity, published);
         if (styles.length > 0) {
           model.styles = "styles2d.json";
-          files.push(["styles2d.json", styles]);
+          files.push([
+            "styles2d.json",
+            fold(catalogue, styles, (why) => log(`  ! ${nation}/${code}: ${why}`)),
+          ]);
         }
       }
       files.push(["model.json", model]);
@@ -138,6 +144,13 @@ export async function publish(
       bytes += Buffer.byteLength(json);
     }
     written++;
+  }
+  // Written last, since a vehicle can only be folded in once it is resolved.
+  if (catalogue.size > 0) {
+    const json = `${JSON.stringify([...catalogue.values()])}\n`;
+    fs.writeFileSync(path.join(settings.out, "styles2d.json"), json);
+    bytes += Buffer.byteLength(json);
+    log(`${catalogue.size} styles in the shared catalogue`);
   }
   return { vehicles: written, bytes };
 }

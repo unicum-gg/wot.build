@@ -109,10 +109,15 @@ export type VehicleModel = {
    */
   marks?: string[];
   /**
-   * Where the 2D styles live, when the client offers any on this vehicle.
+   * Where this vehicle's 2D styles live, when the client offers any.
    *
    * A separate file rather than a field: it is a long list nothing needs until
    * a player opens the paint shop, and the manifest is read on every load.
+   *
+   * **It holds a patch, not the styles.** The recipes themselves are the same on
+   * every vehicle that can wear them, so they are published once at the root of
+   * the mirror, also as `styles2d.json`, and this names which of them this
+   * vehicle is offered and the handful whose tiling the client tuned for it.
    */
   styles?: string;
   /**

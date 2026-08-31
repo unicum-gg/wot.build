@@ -20,6 +20,7 @@ import type { VehicleModel } from "../lib/model.js";
 import { convertCamouflage, convertTexture, TextureQuality } from "../lib/texture.js";
 import { readSkinMarks, readStyles, type Style2D } from "../lib/style.js";
 import { nameFor, readCatalogue } from "../lib/localization.js";
+import { fold } from "../lib/models/catalogue.js";
 import { readMarks } from "../lib/insignia.js";
 
 const [, , source, out] = process.argv;
@@ -344,7 +345,13 @@ async function writeStyles(into: string): Promise<Style2D[]> {
   // Sorted on the name a player reads, which is only known once the catalogue
   // has been applied.
   kept.sort((a, b) => a.name.localeCompare(b.name));
-  fs.writeFileSync(path.join(into, "styles2d.json"), `${JSON.stringify(kept)}\n`);
+  // The same split the generator publishes: the recipes once at the root, and
+  // beside the vehicle only what is its own. Reading one and not the other is
+  // what let the pattern measurement rot unnoticed for two days.
+  const shared = new Map<number, Style2D>();
+  const patch = fold(shared, kept, (why) => console.log(`  ! ${why}`));
+  fs.writeFileSync(path.join(out, "styles2d.json"), `${JSON.stringify([...shared.values()])}\n`);
+  fs.writeFileSync(path.join(into, "styles2d.json"), `${JSON.stringify(patch)}\n`);
   console.log(`  ${kept.length} 2D styles, ${written.size} patterns`);
   return kept;
 }

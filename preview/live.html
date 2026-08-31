@@ -696,11 +696,39 @@
        */
       let marks = 0;
 
+      /**
+       * The styles, assembled from the shared catalogue and this vehicle's patch.
+       *
+       * A recipe is the same on every vehicle that can wear it, so the mirror
+       * publishes it once at the root and each vehicle keeps only which of them
+       * it is offered and the handful whose tiling the client tuned for it.
+       * The catalogue is fetched once and reused: it is the same file for every
+       * tank, and re-reading it per vehicle is what made a page carry 1.6 MB of
+       * paint shop it already had.
+       */
+      let catalogue = null;
       async function findStyles() {
         const at = visual?.styles;
         if (!at) return;
         try {
-          styles2d = await (await fetch(fresh(`${ROOT}/vehicles/${wearing()}/${at}`))).json();
+          catalogue ??= new Map(
+            (await (await fetch(fresh(`${ROOT}/styles2d.json`))).json()).map((s) => [s.id, s]),
+          );
+          const patch = await (await fetch(fresh(`${ROOT}/vehicles/${wearing()}/${at}`))).json();
+          const tuned = new Map(patch.tiling.map(([id, o, k, t]) => [`${id}/${o}/${k}`, t]));
+          styles2d = patch.offers
+            .map((id) => catalogue.get(id))
+            .filter(Boolean)
+            .map((style) => ({
+              ...style,
+              outfits: style.outfits.map((outfit, o) => ({
+                ...outfit,
+                camouflages: outfit.camouflages.map((c, k) => ({
+                  ...c,
+                  tiling: tuned.get(`${style.id}/${o}/${k}`) ?? c.tiling,
+                })),
+              })),
+            }));
         } catch {
           styles2d = [];
         }
