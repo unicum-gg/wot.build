@@ -41,7 +41,9 @@ different.
   minimap markers cut out of the client's battle atlas
 - `generate-models.ts`: a vehicle's **armor**, read out of the Havok collision
   files as named plates, and its **visual model**, converted from BigWorld
-  geometry to glTF with its textures as WebP
+  geometry to glTF with its textures as WebP, plus two files at the root: the
+  2D style catalogue, published once rather than beside every vehicle, and the
+  index saying which vehicles exist and under which nation folder
 
 The sources mirror does the opposite of the assets one and **empties its
 worktree first**: a script the client dropped must stop being published, because

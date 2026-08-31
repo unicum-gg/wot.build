@@ -81,6 +81,8 @@ export async function publish(
 
   /** Every style the mirror publishes, written once at the root. */
   const catalogue = new Map<number, Style2D>();
+  /** Where each published vehicle sits, which is also the list of what exists. */
+  const index: Record<string, string> = {};
   let written = 0;
   let bytes = 0;
   for (const [key, entry] of vehicles) {
@@ -143,8 +145,27 @@ export async function publish(
       fs.writeFileSync(path.join(dir, name), json);
       bytes += Buffer.byteLength(json);
     }
+    index[code] = nation;
     written++;
   }
+  // **Where each vehicle is, and therefore which ones exist at all.**
+  //
+  // A consumer knows a vehicle by the code the game gives it, `R45_IS-7`, and
+  // that is the folder's name; what it cannot know is the nation folder above
+  // it, because the scripts call that nation `ussr` and the content calls it
+  // `russian`, and nothing in either says so. The extraction resolves it by
+  // looking the code up in every nation's index, which needs the client.
+  //
+  // So the mapping is published. It doubles as the list of what the mirror
+  // carries: a site draws from a catalogue wider than this one, and this is how
+  // it knows to fall back to a picture rather than ask for a model that is not
+  // there.
+  if (written > 0) {
+    const json = `${JSON.stringify(Object.fromEntries(Object.entries(index).sort()))}\n`;
+    fs.writeFileSync(path.join(settings.out, "vehicles.json"), json);
+    bytes += Buffer.byteLength(json);
+  }
+
   // Written last, since a vehicle can only be folded in once it is resolved.
   if (catalogue.size > 0) {
     const json = `${JSON.stringify([...catalogue.values()])}\n`;
