@@ -81,7 +81,7 @@ export async function publish(
 
   /** Every style the mirror publishes, written once at the root. */
   const catalogue = new Map<number, Style2D>();
-  /** Where each published vehicle sits, which is also the list of what exists. */
+  /** Where each drawable vehicle sits, which is also the list of what exists. */
   const index: Record<string, string> = {};
   let written = 0;
   let bytes = 0;
@@ -137,6 +137,11 @@ export async function publish(
         }
       }
       files.push(["model.json", model]);
+      // Indexed on the model, not on the vehicle: six of the catalogue's
+      // variants publish a collision and no meshes, having none of their own,
+      // and a viewer that trusted the index would ask for a model that is not
+      // there.
+      index[code] = nation;
     }
     if (files.length === 0) continue;
     fs.mkdirSync(dir, { recursive: true });
@@ -145,7 +150,6 @@ export async function publish(
       fs.writeFileSync(path.join(dir, name), json);
       bytes += Buffer.byteLength(json);
     }
-    index[code] = nation;
     written++;
   }
   // **Where each vehicle is, and therefore which ones exist at all.**
