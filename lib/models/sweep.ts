@@ -51,6 +51,17 @@ export const SCRIPT_PACKAGE = /^res\/packages\/scripts\.pkg$/;
 // the rest of its nation, which the same depth covers. Everything deeper
 // (alternative liveries, wrecks, coarser levels of detail) is left behind.
 const COLLISION_GLOB = "vehicles/*/*/collision_client/*.havok";
+// The CGF prefabs, which are where a mechanism's animation lives. They are JSON
+// and there are a few hundred of them, so the whole tree is taken rather than
+// the handful a run happens to reference: a prefab points at other prefabs, and
+// resolving that from a glob would mean sweeping twice.
+const PREFAB_GLOBS = [
+  "content/CGFPrefabs/*.prefab",
+  "content/CGFPrefabs/*/*.prefab",
+  "content/CGFPrefabs/*/*/*.prefab",
+  "content/CGFPrefabs/*/*/*/*.prefab",
+  "content/CGFPrefabs/*/*/*/*/*.prefab",
+];
 const VISUAL_GLOBS = ["vehicles/*/*/normal/lod0/*", "vehicles/*/*/*.dds", TRACK_GLOB];
 const SHARED_GLOBS = ["vehicles/*/*/*.dds"];
 
@@ -59,7 +70,12 @@ const SHARED_GLOBS = ["vehicles/*/*/*.dds"];
 // them between them and taking the lot would swell the mirror for a feature
 // nothing reads yet. `--skins` pulls them, which is what looking at one
 // vehicle's styles needs.
-const SKIN_GLOBS = ["vehicles/*/*/_skins/*/normal/lod0/*", "vehicles/*/*/_skins/*/*.dds"];
+/** The folder a vehicle keeps its 3D styles in, one set of pieces per name. */
+export const SKIN_FOLDER = "_skins";
+const SKIN_GLOBS = [
+  `vehicles/*/*/${SKIN_FOLDER}/*/normal/lod0/*`,
+  `vehicles/*/*/${SKIN_FOLDER}/*/*.dds`,
+];
 
 // What a 2D style puts on a vehicle that is not paint: the marks of excellence
 // and the stickers and lettering. These live under `gui/` rather than under a
@@ -112,6 +128,7 @@ export async function sweep(
         ...VISUAL_GLOBS,
         ...SHARED_GLOBS,
         VEHICLE_SCRIPTS_GLOB,
+        ...PREFAB_GLOBS,
         ...CUSTOMIZATION_GLOBS,
         ...DECAL_GLOBS,
         ...(settings.withSkins ? SKIN_GLOBS : []),
@@ -120,7 +137,20 @@ export async function sweep(
   fs.rmSync(pkgDir, { recursive: true, force: true });
 }
 
-/** The vehicle folders a sweep produced, in a stable order. */
+/**
+ * The vehicle folders a sweep produced, in a stable order.
+ *
+ * **A 3D style comes back as a vehicle whose code carries its folder.** It is
+ * one, as far as everything downstream is concerned: a full set of pieces with
+ * textures of its own, read from `normal/lod0` and written beside its parent.
+ * Every path in the conversion is built as `vehicles/<nation>/<code>/...`, so a
+ * code of `R97_Object_140/_skins/hardline` lands on the style's own folder at
+ * both ends without a single new path. That is what the note on `skins` in
+ * `model.ts` meant by "only a different folder".
+ *
+ * Nothing is listed here unless `--skins` pulled it, so a run without the flag
+ * behaves exactly as it did.
+ */
 export function swept(work: string): Vehicle[] {
   const root = path.join(work, "vehicles");
   if (!fs.existsSync(root)) return [];
@@ -131,6 +161,12 @@ export function swept(work: string): Vehicle[] {
     for (const code of fs.readdirSync(nationDir).sort()) {
       if (!fs.statSync(path.join(nationDir, code)).isDirectory()) continue;
       out.push({ nation, code });
+      const skins = path.join(nationDir, code, SKIN_FOLDER);
+      if (!fs.existsSync(skins)) continue;
+      for (const skin of fs.readdirSync(skins).sort()) {
+        if (!fs.statSync(path.join(skins, skin)).isDirectory()) continue;
+        out.push({ nation, code: `${code}/${SKIN_FOLDER}/${skin}` });
+      }
     }
   }
   return out;

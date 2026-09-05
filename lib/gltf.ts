@@ -6,10 +6,8 @@
 // and so a texture the client shares between pieces is fetched once. Each render
 // set becomes its own mesh under a node named after it, which is what lets a
 // viewer hide or recolour one part of a piece.
-const MAGIC = 0x46546c67;
-const JSON_CHUNK = 0x4e4f534a;
-const BIN_CHUNK = 0x004e4942;
-const VERSION = 2;
+import { BufferBuilder, container, floats, type Accessor } from "./glb.js";
+import { compose, decompose, invert, type Placement } from "./placement.js";
 
 const enum ComponentType {
   UnsignedShort = 5123,
@@ -28,7 +26,36 @@ export type GltfBone = {
   /** Three-by-three basis as row vectors, then a translation. */
   basis: number[];
   offset: number[];
+  /**
+   * The bone above it, where this one has to hang off another.
+   *
+   * **Almost none of them do, and that is deliberate.** A flat skeleton of world
+   * placements is what a viewer that turns one wheel wants: it writes the bone's
+   * matrix and the skin cancels the rest against the bind pose. Parenting them
+   * all would break that, because the bone's world would stop being the matrix
+   * the viewer wrote.
+   *
+   * A chain appears only where an animation needs one. The client keyframes a
+   * node's transform in its parent's space, so a gun chamber swinging open has
+   * to carry the plunger inside it, and a chamber whose parent was folded away
+   * carries nothing. Only the nodes on such a chain are parented; everything
+   * else stays exactly as flat as it was.
+   */
+  parent?: string;
 };
+
+/** One node's curve, already in the piece's published space. */
+export type GltfChannel = {
+  /** The node it drives, by the name the mesh gives it. */
+  node: string;
+  path: "translation" | "rotation" | "scale";
+  /** Sample times in seconds, ascending. */
+  times: number[];
+  /** Three floats per sample, or four for a rotation quaternion. */
+  values: number[];
+};
+
+export type GltfAnimation = { name: string; channels: GltfChannel[] };
 
 export type GltfMesh = {
   name: string;
@@ -54,53 +81,19 @@ export type GltfMesh = {
    * so one that does not ignore it can turn a road wheel.
    */
   skeleton?: GltfBone[];
+  /**
+   * How many of them the skin binds, where the list runs on past its joints.
+   *
+   * The bones come first, in the order the vertices index them, and anything
+   * after is an ancestor carried along so an animation has a chain to move.
+   * Absent when there is no such tail, which is every piece with no mechanism.
+   */
+  jointCount?: number;
   /** Four bone indices per vertex, into `skeleton`. */
   joints?: number[];
   /** Four weights per vertex, matching `joints`. */
   weights?: number[];
 };
-
-type Accessor = {
-  bufferView: number;
-  byteOffset?: number;
-  componentType: number;
-  count: number;
-  type: string;
-  min?: number[];
-  max?: number[];
-};
-
-function pad(length: number): number {
-  return (4 - (length % 4)) % 4;
-}
-
-class BufferBuilder {
-  private readonly chunks: Buffer[] = [];
-  private length = 0;
-  readonly views: { buffer: number; byteOffset: number; byteLength: number; target?: number }[] = [];
-
-  add(data: Buffer, target?: number): number {
-    const padding = pad(this.length);
-    if (padding > 0) {
-      this.chunks.push(Buffer.alloc(padding));
-      this.length += padding;
-    }
-    this.views.push({ buffer: 0, byteOffset: this.length, byteLength: data.length, target });
-    this.chunks.push(data);
-    this.length += data.length;
-    return this.views.length - 1;
-  }
-
-  build(): Buffer {
-    return Buffer.concat([...this.chunks, Buffer.alloc(pad(this.length))]);
-  }
-}
-
-function floats(values: number[]): Buffer {
-  const out = Buffer.alloc(values.length * 4);
-  for (let i = 0; i < values.length; i++) out.writeFloatLE(values[i], i * 4);
-  return out;
-}
 
 /**
  * A bone's placement as the sixteen floats glTF wants, column-major.
@@ -148,12 +141,17 @@ function bounds(positions: number[]): { min: number[]; max: number[] } {
  * The client's space is already Y-up, so positions go in untouched and a viewer
  * needs no correction beyond pointing its camera.
  */
-export function writeGlb(meshes: GltfMesh[]): Buffer {
+export function writeGlb(meshes: GltfMesh[], clips: GltfAnimation[] = []): Buffer {
   const buffer = new BufferBuilder();
   const accessors: Accessor[] = [];
   const gltfMeshes: unknown[] = [];
-  const nodes: unknown[] = [];
+  const nodes: Record<string, unknown>[] = [];
   const skins: unknown[] = [];
+  // Which node indices carry each name, so a channel can find what it drives.
+  // A list rather than one index: a piece drawn as several render sets emits
+  // its shared bones once per set, and an animation has to move all of them.
+  const named = new Map<string, number[]>();
+  const animated = new Set(clips.flatMap((c) => c.channels.map((ch) => ch.node)));
 
   for (const mesh of meshes) {
     const wide = mesh.positions.length / 3 > 0xffff;
@@ -232,19 +230,49 @@ export function writeGlb(meshes: GltfMesh[]): Buffer {
     let skin: number | undefined;
     if (mesh.skeleton && mesh.joints && mesh.weights) {
       const first = nodes.length;
-      for (const bone of mesh.skeleton) nodes.push({ name: bone.name, matrix: matrixOf(bone) });
+      const at = new Map(mesh.skeleton.map((bone, i) => [bone.name, first + i]));
+      for (const bone of mesh.skeleton) {
+        const index = nodes.length;
+        // A parented bone's own matrix is what is left of its placement once
+        // its parent's is taken off, so the two together still put it exactly
+        // where the flat placement did.
+        const above = bone.parent === undefined ? undefined : mesh.skeleton.find((b) => b.name === bone.parent);
+        const local: Placement = above
+          ? compose(invert({ basis: above.basis, offset: above.offset }), { basis: bone.basis, offset: bone.offset })
+          : { basis: bone.basis, offset: bone.offset };
+        // glTF forbids a matrix on a node an animation drives, so anything the
+        // clips touch is written as the three parts instead.
+        const placed = animated.has(bone.name)
+          ? (() => {
+              const trs = decompose(local);
+              return { translation: trs.translation, rotation: trs.rotation, scale: trs.scale };
+            })()
+          : { matrix: matrixOf({ name: bone.name, basis: local.basis, offset: local.offset }) };
+        nodes.push({ name: bone.name, ...placed });
+        named.set(bone.name, [...(named.get(bone.name) ?? []), index]);
+      }
+      // Wired in a second pass: the ancestors an animation needs are appended
+      // after the joints, so a joint's parent is usually a node that does not
+      // exist yet while the first pass is running.
+      mesh.skeleton.forEach((bone, i) => {
+        const parent = bone.parent === undefined ? undefined : at.get(bone.parent);
+        if (parent === undefined) return;
+        const holder = nodes[parent];
+        holder.children = [...((holder.children as number[]) ?? []), first + i];
+      });
 
-      const bind = Buffer.concat(mesh.skeleton.map((bone) => floats(inverseMatrixOf(bone))));
+      const joints = mesh.skeleton.slice(0, mesh.jointCount ?? mesh.skeleton.length);
+      const bind = Buffer.concat(joints.map((bone) => floats(inverseMatrixOf(bone))));
       const inverseBindMatrices = accessors.push({
         bufferView: buffer.add(bind),
         componentType: ComponentType.Float,
-        count: mesh.skeleton.length,
+        count: joints.length,
         type: "MAT4",
       }) - 1;
 
       const jointData = Buffer.alloc(mesh.joints.length * 2);
       for (let i = 0; i < mesh.joints.length; i++) {
-        jointData.writeUInt16LE(Math.min(mesh.joints[i], mesh.skeleton.length - 1), i * 2);
+        jointData.writeUInt16LE(Math.min(mesh.joints[i], (mesh.jointCount ?? mesh.skeleton.length) - 1), i * 2);
       }
       attributes.JOINTS_0 = accessors.push({
         bufferView: buffer.add(jointData, Target.ArrayBuffer),
@@ -259,8 +287,10 @@ export function writeGlb(meshes: GltfMesh[]): Buffer {
         type: "VEC4",
       }) - 1;
 
+      // Only the leading entries are joints: anything after them is an
+      // ancestor added to carry an animation, which the skin never binds.
       skins.push({
-        joints: mesh.skeleton.map((_, i) => first + i),
+        joints: mesh.skeleton.slice(0, mesh.jointCount ?? mesh.skeleton.length).map((_, i) => first + i),
         inverseBindMatrices,
       });
       skin = skins.length - 1;
@@ -270,14 +300,48 @@ export function writeGlb(meshes: GltfMesh[]): Buffer {
     nodes.push({ name: mesh.name, mesh: gltfMeshes.length - 1, ...(skin === undefined ? {} : { skin }) });
   }
 
+  const animations = clips.map((clip) => {
+    const samplers: unknown[] = [];
+    const channels: unknown[] = [];
+    for (const channel of clip.channels) {
+      const targets = named.get(channel.node);
+      if (!targets || channel.times.length === 0) continue;
+      const stride = channel.path === "rotation" ? 4 : 3;
+      if (channel.values.length !== channel.times.length * stride) continue;
+      const input = accessors.push({
+        bufferView: buffer.add(floats(channel.times)),
+        componentType: ComponentType.Float,
+        count: channel.times.length,
+        type: "SCALAR",
+        // Required on an animation's input, and what a player reads the clip's
+        // length off.
+        min: [channel.times[0]],
+        max: [channel.times[channel.times.length - 1]],
+      }) - 1;
+      const output = accessors.push({
+        bufferView: buffer.add(floats(channel.values)),
+        componentType: ComponentType.Float,
+        count: channel.times.length,
+        type: stride === 4 ? "VEC4" : "VEC3",
+      }) - 1;
+      const sampler = samplers.push({ input, output, interpolation: "LINEAR" }) - 1;
+      for (const node of targets) channels.push({ sampler, target: { node, path: channel.path } });
+    }
+    return { name: clip.name, samplers, channels };
+  }).filter((clip) => (clip.channels as unknown[]).length > 0);
+
+  // A node another one carries is not a root, or a viewer would draw it twice
+  // and place the second copy as though it hung off nothing.
+  const carried = new Set(nodes.flatMap((n) => (n.children as number[]) ?? []));
   const bin = buffer.build();
   const json = Buffer.from(
     JSON.stringify({
       asset: { version: "2.0", generator: "wot.build" },
       scene: 0,
-      scenes: [{ nodes: nodes.map((_, i) => i) }],
+      scenes: [{ nodes: nodes.map((_, i) => i).filter((i) => !carried.has(i)) }],
       nodes,
       ...(skins.length > 0 ? { skins } : {}),
+      ...(animations.length > 0 ? { animations } : {}),
       meshes: gltfMeshes,
       accessors,
       bufferViews: buffer.views,
@@ -285,20 +349,5 @@ export function writeGlb(meshes: GltfMesh[]): Buffer {
     }),
     "utf8",
   );
-  const jsonPadded = Buffer.concat([json, Buffer.alloc(pad(json.length), 0x20)]);
-
-  const header = Buffer.alloc(12);
-  header.writeUInt32LE(MAGIC, 0);
-  header.writeUInt32LE(VERSION, 4);
-  header.writeUInt32LE(12 + 8 + jsonPadded.length + 8 + bin.length, 8);
-
-  const jsonHeader = Buffer.alloc(8);
-  jsonHeader.writeUInt32LE(jsonPadded.length, 0);
-  jsonHeader.writeUInt32LE(JSON_CHUNK, 4);
-
-  const binHeader = Buffer.alloc(8);
-  binHeader.writeUInt32LE(bin.length, 0);
-  binHeader.writeUInt32LE(BIN_CHUNK, 4);
-
-  return Buffer.concat([header, jsonHeader, jsonPadded, binHeader, bin]);
+  return container(json, bin);
 }

@@ -14,6 +14,9 @@
 // skinned chassis, so nothing has to be transformed to draw a vehicle at rest.
 import { decodePacked, type PackedNode } from "./packed.js";
 import { child, children } from "./read.js";
+import { compose, IDENTITY, type Placement } from "./placement.js";
+
+export { place, type Placement } from "./placement.js";
 
 export type VisualNode = {
   name: string;
@@ -161,31 +164,6 @@ export function readVisual(buf: Buffer): Visual {
   };
 }
 
-/** A node's placement: a three-by-three basis followed by a translation. */
-export type Placement = { basis: number[]; offset: number[] };
-
-const IDENTITY: Placement = { basis: [1, 0, 0, 0, 1, 0, 0, 0, 1], offset: [0, 0, 0] };
-
-/** Apply a placement to a point. The client stores its basis as row vectors. */
-export function place(p: Placement, x: number, y: number, z: number): [number, number, number] {
-  const b = p.basis;
-  return [
-    x * b[0] + y * b[3] + z * b[6] + p.offset[0],
-    x * b[1] + y * b[4] + z * b[7] + p.offset[1],
-    x * b[2] + y * b[5] + z * b[8] + p.offset[2],
-  ];
-}
-
-/** `child` expressed in the space `parent` lives in. */
-function compose(parent: Placement, child: Placement): Placement {
-  const basis: number[] = [];
-  for (let row = 0; row < 3; row++) {
-    const v = place({ basis: parent.basis, offset: [0, 0, 0] }, child.basis[row * 3], child.basis[row * 3 + 1], child.basis[row * 3 + 2]);
-    basis.push(...v);
-  }
-  return { basis, offset: place(parent, child.offset[0], child.offset[1], child.offset[2]) };
-}
-
 function toPlacement(node: VisualNode): Placement {
   const t = node.transform;
   return t.length >= 12 ? { basis: t.slice(0, 9), offset: t.slice(9, 12) } : IDENTITY;
@@ -205,6 +183,37 @@ export function placements(root: VisualNode | null): Map<string, Placement> {
     for (const c of node.children) walk(c, here);
   };
   if (root) walk(root, IDENTITY);
+  return out;
+}
+
+/** A node's place in the tree: what it hangs off, and where it sits on it. */
+export type VisualPlace = {
+  /** The node above it, or null at the root. */
+  parent: string | null;
+  /** Its placement in that parent's space, as the client writes it. */
+  local: Placement;
+  /** And the same folded down to the piece's own space. */
+  world: Placement;
+};
+
+/**
+ * The node tree, kept as a tree rather than flattened.
+ *
+ * `placements` answers where a node ends up, which is all a viewer drawing a
+ * vehicle at rest needs. An animation needs the shape as well: the client's
+ * keyframes are a node's own transform in its parent's space, so turning a gun
+ * chamber has to carry the plunger inside it, and a chamber whose parent has
+ * been folded away carries nothing.
+ */
+export function tree(root: VisualNode | null): Map<string, VisualPlace> {
+  const out = new Map<string, VisualPlace>();
+  const walk = (node: VisualNode, parent: string | null, above: Placement): void => {
+    const local = toPlacement(node);
+    const world = compose(above, local);
+    out.set(node.name, { parent, local, world });
+    for (const c of node.children) walk(c, node.name, world);
+  };
+  if (root) walk(root, null, IDENTITY);
   return out;
 }
 
