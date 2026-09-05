@@ -179,6 +179,22 @@ function tautBand(wheels: BeltWheel[]): number[][] {
 }
 
 /**
+ * The belt a set of wheels makes on their own, with no path to go by.
+ *
+ * The Swedish destroyers ship no `.track` file and no spline: their belt is a
+ * chain the game simulates on the wheels rather than a shape anyone drew. What
+ * a chain pulled tight around wheels settles into is the taut band, so the band
+ * is the path, and it is the same band every other belt is seated on.
+ *
+ * `x` places it on the plane its wheels turn in.
+ */
+export function beltAround(wheels: BeltWheel[], x: number): number[][] {
+  const band = tautBand(wheels);
+  if (band.length < 3) return [];
+  return band.map(([z, y]) => [x, y, z]);
+}
+
+/**
  * How far inside its wheels the client draws this belt.
  *
  * `groupRadius` is where the track *touches* a wheel, and the path is the line
@@ -216,11 +232,23 @@ function inset(points: number[][], wheels: BeltWheel[]): number {
  * reads as sitting too far forward, out of its own belt. The wheels are not
  * wrong there, the path is.
  *
- * A belt cannot pass inside the band its wheels pull it into, so any point that
- * has is moved straight out onto that band, and the corners of the band the path
- * had skipped past are put back. Points already outside are left exactly as they
- * are, which is what keeps the top run where the client put it: it rides high on
- * the track guards, well clear of any wheel, and no wheel has a say in it.
+ * **A tensioned belt is the taut band, and nothing else.** It cannot pass inside
+ * the band its wheels pull it into, and it has nothing to hang from outside it
+ * either: every point sits on it. So the band is the belt, and the client's own
+ * loop decides only where along it the samples fall.
+ *
+ * The hand-placed loop was tried as the belt and it is not one. On the E 100 it
+ * runs 92 mm clear of the rear idler and reaches 590 mm past it, a belt hanging
+ * in the air behind the tank; on the Tiger its upper run is level at 1.199 where
+ * the wheels put it at 0.896, so the track floats 300 mm over its own road
+ * wheels instead of climbing from the idler to the taller front sprocket, which
+ * is the shape anyone would recognise the vehicle by.
+ *
+ * Lifting only, which is what this did first, corrects the first of those and
+ * not the second. The fear that held it back was a top run resting on guards the
+ * wheels know nothing about, and the client answers it: a vehicle whose track is
+ * carried up there declares its return rollers as wheels like any other, so the
+ * band already passes over them.
  */
 export function hugWheels(points: number[][], wheels: BeltWheel[]): number[][] {
   if (wheels.length === 0 || points.length < 3) return points;
@@ -236,17 +264,6 @@ export function hugWheels(points: number[][], wheels: BeltWheel[]): number[][] {
   const corners = band
     .map((p) => ({ point: p, at: angleOf(p[0], p[1]) }))
     .sort((a, b) => a.at - b.at);
-
-  // The band is convex and the middle of the wheels is inside it, so a point is
-  // outside whenever it is on the outer side of any one of its edges.
-  const outside = (z: number, y: number): boolean => {
-    for (let i = 0; i < band.length; i++) {
-      const a = band[i];
-      const b = band[(i + 1) % band.length];
-      if ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (z - a[0]) < 0) return true;
-    }
-    return false;
-  };
 
   /**
    * Where the band sits straight out from the middle, at this angle.
@@ -276,16 +293,12 @@ export function hugWheels(points: number[][], wheels: BeltWheel[]): number[][] {
     return [centre[0] + dz * reach, centre[1] + dy * reach];
   };
 
-  // Two points that both had to be lifted are two points of one arc, and a
-  // straight line between them cuts across it, so the band's own corners go in
-  // between. Only between two lifted points: a point the path put outside the
-  // band is a point the band has nothing to say about, and threading corners up
-  // to it is what put a spike in the loop and made links jump as they slid past.
-  const lifted = points.map((point) => {
-    if (outside(point[2], point[1])) return { point, at: 0, on: false };
+  // Two consecutive seats are two points of one arc, and a straight line between
+  // them cuts across it, so the band's own corners go in between.
+  const seated = points.map((point) => {
     const at = angleOf(point[2], point[1]);
     const seat = bandAt(at);
-    return { point: [point[0], seat[1], seat[0]], at, on: true };
+    return { point: [point[0], seat[1], seat[0]], at };
   });
 
   const out: number[][] = [];
@@ -296,11 +309,10 @@ export function hugWheels(points: number[][], wheels: BeltWheel[]): number[][] {
     if (last && Math.hypot(point[2] - last[2], point[1] - last[1]) < 0.002) return;
     out.push(point);
   };
-  for (let i = 0; i < lifted.length; i++) {
-    const here = lifted[i];
-    const next = lifted[(i + 1) % lifted.length];
+  for (let i = 0; i < seated.length; i++) {
+    const here = seated[i];
+    const next = seated[(i + 1) % seated.length];
     keep(here.point);
-    if (!here.on || !next.on) continue;
     let sweep = next.at - here.at;
     while (sweep > Math.PI) sweep -= Math.PI * 2;
     while (sweep < -Math.PI) sweep += Math.PI * 2;
