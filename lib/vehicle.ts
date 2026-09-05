@@ -10,12 +10,14 @@
 // where every texture lives. Materials are deduplicated across the vehicle,
 // since a hull and its turret routinely share the detail and colour-id maps.
 import { blocks, readIndices, readUvStream, readVertices, type VertexData } from "./primitives.js";
-import { hugWheels, mirrorPath, type BeltWheel } from "./track.js";
+import { beltOf } from "./belt.js";
+import { finishMaterials } from "./material.js";
+import { unskin } from "./skin.js";
 import { writeGlb, type GltfBone, type GltfMesh } from "./gltf.js";
 import { mirrorPoint, mirrorPositions, reverseWinding } from "./handedness.js";
-import type { ChassisWheel } from "./chassis.js";
+import type { ChassisSpline, ChassisWheel, PhysicalTrack } from "./chassis.js";
 import type { CustomizationSlot } from "./slots.js";
-import type { PieceCamouflage } from "./script.js";
+import type { PieceCamouflage } from "./pieces.js";
 import {
   ALPHA_SCALE,
   CAMOUFLAGE_MASK_PROPERTY,
@@ -26,9 +28,22 @@ import {
   texturePath,
   type Material,
 } from "./material.js";
-import { MirrorFeature, type Piece, type Tracks, type VehicleModel } from "./model.js";
-import { hardpoints, place, placements, readVisual, type Placement, type VisualMaterial, type VisualRenderSet } from "./visual.js";
-import { determinant, skeletonOf, unit, wheelsOf, type Wheel } from "./wheels.js";
+import { MirrorFeature, type Piece, type VehicleModel } from "./model.js";
+import { hardpoints, place, placements, readVisual, tree, type Placement, type VisualMaterial, type VisualRenderSet } from "./visual.js";
+import { clipsFor, movedBy } from "./animation.js";
+import type { SequenceClip } from "./sequence.js";
+import {
+  determinant,
+  skeletonOf,
+  unit,
+  floorsOf,
+  leverSpansOf,
+  leversFrom,
+  ridersOf,
+  wheelsOf,
+  type Lever,
+  type Wheel,
+} from "./wheels.js";
 
 /**
  * Accumulates a vehicle's pieces, keeping one material list for the whole
@@ -101,77 +116,20 @@ export class VehicleBuilder {
   }
 
   /**
-   * Move a skinned set's vertices out of bone space and into the piece's.
-   *
-   * This is the rest pose the game itself starts from: each vertex is placed by
-   * every bone it leans on and the results blended by weight, rather than
-   * snapped to whichever bone pulls hardest. The client's bones sit at the
-   * identity save for a flip of the Z axis, so a set drawn without them comes
-   * out back to front, a gun's muzzle ending up behind its breech. The flip also
-   * reverses winding, so triangles are turned back around to keep their faces
-   * pointing out.
-   */
-  private unskin(set: VisualRenderSet, vertices: VertexData, indices: number[], nodes: Map<string, Placement>): void {
-    if (set.bones.length === 0 || vertices.bones.length === 0) return;
-    const bones = set.bones.map((name) => nodes.get(name));
-    if (!bones.some(Boolean)) return;
-
-    const mirrored = bones.every((b) => !b || determinant(b.basis) < 0);
-    const count = vertices.positions.length / 3;
-    for (let i = 0; i < count; i++) {
-      const at = i * 3;
-      const skinAt = i * 4;
-      const position = [0, 0, 0];
-      const normal = [0, 0, 0];
-      const tangent = [0, 0, 0];
-      let total = 0;
-      for (let k = 0; k < 4; k++) {
-        const weight = vertices.weights[skinAt + k];
-        const bone = bones[vertices.bones[skinAt + k]];
-        if (!(weight > 0) || !bone) continue;
-        const rotation = { basis: bone.basis, offset: [0, 0, 0] };
-        const p = place(bone, vertices.positions[at], vertices.positions[at + 1], vertices.positions[at + 2]);
-        const n = place(rotation, vertices.normals[at], vertices.normals[at + 1], vertices.normals[at + 2]);
-        const t = vertices.tangents.length
-          ? place(rotation, vertices.tangents[i * 4], vertices.tangents[i * 4 + 1], vertices.tangents[i * 4 + 2])
-          : [0, 0, 0];
-        for (let axis = 0; axis < 3; axis++) {
-          position[axis] += weight * p[axis];
-          normal[axis] += weight * n[axis];
-          tangent[axis] += weight * t[axis];
-        }
-        total += weight;
-      }
-      if (total <= 0) continue;
-      for (let axis = 0; axis < 3; axis++) position[axis] /= total;
-      // Blending shortens a direction, so both frames go back to unit length.
-      const unitNormal = unit(normal);
-      const unitTangent = unit(tangent);
-      for (let axis = 0; axis < 3; axis++) {
-        vertices.positions[at + axis] = position[axis];
-        vertices.normals[at + axis] = unitNormal[axis];
-        if (vertices.tangents.length) vertices.tangents[i * 4 + axis] = unitTangent[axis];
-      }
-      // A mirroring bone swaps which way the bitangent turns.
-      if (mirrored && vertices.tangents.length) vertices.tangents[i * 4 + 3] *= -1;
-    }
-    // A mirroring bone was reversing the winding here as well. It should not:
-    // the normals have just been carried through the same mirror, so they
-    // already point the way the unreversed winding says they do. Doing both
-    // left every skinned piece — every chassis in the mirror — with normals
-    // facing the opposite way to its own triangles, which lights a track and
-    // its road wheels from the wrong side.
-  }
-
-  /**
    * Convert one piece. Returns the `.glb` to write, or null when the piece has
    * no geometry to draw, which is what a visual whose blocks live in another
    * file looks like from here.
    */
-  add(name: string, visualBuf: Buffer, primitivesBuf: Buffer): Buffer | null {
+  add(name: string, visualBuf: Buffer, primitivesBuf: Buffer, clips: SequenceClip[] = []): Buffer | null {
     const visual = readVisual(visualBuf);
     const index = blocks(primitivesBuf);
     const nodes = placements(visual.root);
+    // The same tree, unflattened, which is what an animation moves through: a
+    // chamber that swings open has to carry the plunger inside it.
+    const shape = tree(visual.root);
+    const animated = new Set([...movedBy(clips)].filter((node) => shape.has(node)));
+    /** What each node ends up hanging off, once the skeletons are built. */
+    const parents = new Map<string, string | undefined>();
 
     const meshes: GltfMesh[] = [];
     const entries: { name: string; materials: number[] }[] = [];
@@ -181,8 +139,11 @@ export class VehicleBuilder {
       if (!vertexBlock || !indexBlock) continue;
       const vertices = readVertices(primitivesBuf, vertexBlock);
       const indices = readIndices(primitivesBuf, indexBlock);
-      this.unskin(set, vertices, indices.indices, nodes);
+      unskin(set, vertices, indices.indices, nodes);
       const label = set.vertices.replace(/\.vertices$/, "") || name;
+
+      const skeleton = skeletonOf(set, nodes, shape, animated);
+      for (const bone of skeleton ?? []) parents.set(bone.name, bone.parent);
 
       // The extra stream is a second UV set or vertex colours, told apart by
       // name. Only the UV set means anything to a glTF consumer.
@@ -212,8 +173,20 @@ export class VehicleBuilder {
       reverseWinding(indices.indices);
 
       // The wheels are read here, with the piece in its final space.
-      for (const wheel of wheelsOf(set, vertices)) {
+      const found = wheelsOf(set, vertices);
+      for (const wheel of found) {
         if (!this.wheels.some((w) => w.bone === wheel.bone)) this.wheels.push(wheel);
+      }
+      // And the arms they ride on, where the vehicle has them, with the half
+      // of the running gear that rides clear of the ground beside it. Kept as
+      // spans and matched to wheels once every set has been read, because a
+      // chassis does not always draw an arm and the wheel it carries together.
+      for (const [bone, span] of leverSpansOf(set, vertices)) {
+        if (!this.leverSpans.has(bone)) this.leverSpans.set(bone, span);
+      }
+      for (const [bone, floor] of floorsOf(set, vertices)) {
+        const known = this.floors.get(bone);
+        if (known === undefined || floor < known) this.floors.set(bone, floor);
       }
 
       meshes.push({
@@ -227,7 +200,8 @@ export class VehicleBuilder {
         groups,
         // The rest pose is already baked into the positions, so the skeleton
         // rides along only for a viewer that wants to move a wheel.
-        skeleton: skeletonOf(set, nodes),
+        skeleton: skeleton,
+        jointCount: set.bones.length,
         joints: vertices.bones.length ? vertices.bones : undefined,
         weights: vertices.weights.length ? vertices.weights : undefined,
       });
@@ -235,18 +209,51 @@ export class VehicleBuilder {
     }
     if (meshes.length === 0) return null;
 
+    const animations = clipsFor(clips, shape, parents);
     this.pieces[name] = {
       glb: `${name}.glb`,
+      ...(animations.length > 0 ? { clips: animations.map((a) => a.name) } : {}),
       hardpoints: Object.fromEntries(
         Object.entries(hardpoints(visual.root)).map(([name, at]) => [name, mirrorPoint(at)]),
       ),
       meshes: entries,
     };
-    return writeGlb(meshes);
+    return writeGlb(meshes, animations);
   }
 
-  /** Name the track link is published under, when the vehicle ships one. */
-  static readonly TRACK_SEGMENT = "TrackSegment";
+  /** Every arm bone's span, until the wheels they carry are all known. */
+  private leverSpans = new Map<string, { min: number[]; max: number[] }>();
+
+  /** How low each of the piece's bones reaches, for the split above. */
+  private floors = new Map<string, number>();
+
+  /** How this chassis lays its belt, once its script has been read. */
+  private spline: ChassisSpline | null = null;
+
+  /** How this chassis chains its belt, where it lays none along a path. */
+  private chain: PhysicalTrack | null = null;
+
+  /** The wheels the chassis says ride on arms, whether or not one is drawn. */
+  private carried: string[] = [];
+
+  /** Told which wheels ride the ground rather than the body. */
+  declareCarried(wheels: string[]): void {
+    this.carried = wheels;
+  }
+
+  /** Which piece each module draws, by the key the scripts name it with. */
+  private modules: Record<string, string> = {};
+
+  /** Told what the scripts call each module that has a model. */
+  declareModules(modules: Record<string, string>): void {
+    this.modules = modules;
+  }
+
+  /** Told what the chassis declares about its belt, laid or chained. */
+  declareSpline(spline: ChassisSpline | null, chain: PhysicalTrack | null = null): void {
+    this.spline = spline;
+    this.chain = chain;
+  }
 
   /**
    * The manifest, keeping only textures that were actually published.
@@ -257,80 +264,42 @@ export class VehicleBuilder {
    * there. `published` holds the mirror-relative path of every texture written.
    */
   build(published: Set<string>, hullPosition: number[] | null): VehicleModel {
-    // The client ships each texture twice, the second at twice the side under a
-    // `_hd` name. The pair is published side by side and named here, so a
-    // viewer can offer the choice without the manifest describing two vehicles.
-    const highDefinition = (path: string) => path.replace(/\.webp$/, "_hd.webp");
-    const materials = this.materials.map((material) => ({
-      ...material,
-      textures: Object.fromEntries(
-        Object.entries(material.textures)
-          .filter(([, texture]) => published.has(texture.path))
-          .map(([property, texture]) => [
-            property,
-            published.has(highDefinition(texture.path))
-              ? { ...texture, hd: highDefinition(texture.path) }
-              : texture,
-          ]),
-      ),
-    }));
-
-    // Fill in the ones the client left empty, from the richest material the
-    // vehicle has that is not itself empty. Preferring one whose name shares a
-    // part with theirs keeps a turret with a turret where both exist.
-    const donors = materials.filter((m) => Object.keys(m.textures).length > 0);
-    if (donors.length > 0) {
-      for (const material of materials) {
-        if (Object.keys(material.textures).length > 0) continue;
-        const part = material.name.replace(/^tank_/, "").replace(/_skinned$/, "");
-        const named = donors.find((d) => d.name.includes(part));
-        const donor = named ?? donors.reduce((a, b) => (Object.keys(b.textures).length > Object.keys(a.textures).length ? b : a));
-        material.textures = donor.textures;
-        material.shader = material.shader || donor.shader;
-        material.inheritedFrom = donor.name;
-      }
-    }
+    const materials = finishMaterials(this.materials, published);
     // The script is the authority on how big a wheel is; the mesh only says
     // where it is. Its names are the tree's, without the `_BlendBone` the skin
     // adds, and it says nothing about a vehicle whose script is gone.
     const wheels = this.wheels.map((wheel) => {
       const declared = this.declared[wheel.bone.replace(/_BlendBone$/, "")];
-      return declared ? { ...wheel, radius: declared.radius, wrap: declared.wrap } : wheel;
+      if (!declared) return wheel;
+      // **Never inside the wheel a player can see.** The chassis is the better
+      // source for what a wheel turns at, and on most vehicles it says a little
+      // more than the rim measures, which is the belt standing proud of it. The
+      // FV304 is the other way round: it declares 289 mm on wheels drawn at 400,
+      // so a belt laid on the declared figure runs straight through them. What
+      // the mesh spans is a floor no declaration gets to go under.
+      //
+      // Measured rather than assumed to be a disc: `wheelsOf` takes the cloud a
+      // bone drives, so a bone that also carries an arm would read large. Every
+      // wheel checked spans the same height as length to within one percent, so
+      // the cloud is the wheel.
+      return {
+        ...wheel,
+        radius: declared.radius,
+        wrap: Math.max(declared.wrap, wheel.wrap),
+      };
     });
 
-    const segment = this.pieces[VehicleBuilder.TRACK_SEGMENT];
-    // Most vehicles ship a path per side, but a symmetrical one ships a single
-    // file and expects the other side to be its mirror.
-    const paths = { ...this.paths };
-    const sides = Object.keys(paths);
-    if (sides.length === 1) {
-      const other = sides[0] === "left" ? "right" : "left";
-      paths[other] = mirrorPath({ points: paths[sides[0]] }).points;
-    }
-    // A belt runs around the wheels on its own side, told apart by which side of
-    // the tank they sit on rather than by their names, which the client keeps
-    // from before the mirror.
-    for (const [side, points] of Object.entries(paths)) {
-      if (points.length === 0) continue;
-      const band: BeltWheel[] = wheels
-        .filter((wheel) => Math.sign(wheel.axle[0]) === Math.sign(points[0][0]))
-        .map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap }));
-      paths[side] = hugWheels(points, band);
-    }
+    // The arms, matched now that every piece's wheels are in: an arm and the
+    // wheel it carries are not always drawn in the same set.
+    const levers = leversFrom(this.leverSpans, wheels);
 
-    // Name each belt for the side it is actually on. The client's own names are
-    // from before the mirror, so carrying them through leaves a path called
-    // `left` lying down the vehicle's right. Nothing reads them today, but the
-    // same thing on the armour plates was the bug that made the hover readout
-    // name the wrong track.
-    const sided: Record<string, number[][]> = {};
-    for (const [side, points] of Object.entries(paths)) {
-      sided[points[0]?.[0] >= 0 ? "left" : "right"] = points;
-    }
-    const tracks =
-      segment && Object.keys(sided).length > 0
-        ? { segment: VehicleBuilder.TRACK_SEGMENT, paths: sided }
-        : undefined;
+    const tracks = beltOf({
+      pieces: this.pieces,
+      paths: this.paths,
+      spline: this.spline,
+      chain: this.chain,
+      wheels,
+    });
     return {
       features: [MirrorFeature.NormalMask],
       ...(hullPosition ? { hullPosition } : {}),
@@ -338,6 +307,29 @@ export class VehicleBuilder {
       materials,
       tracks,
       ...(wheels.length > 0 ? { wheels } : {}),
+      // **Which piece each module draws.** Published only for the pieces this
+      // build actually carries: a key naming a gun the mirror never converted
+      // would send a reader's choice at a file that is not there.
+      ...(Object.keys(this.modules).length > 0
+        ? {
+            modules: Object.fromEntries(
+              Object.entries(this.modules).filter(([, piece]) => this.pieces[piece]),
+            ),
+          }
+        : {}),
+      // **Which wheels stay on the ground, said outright.** Recovering it from
+      // the arms alone loses the two vehicles that declare arms and draw none,
+      // and those come out with every wheel bolted to the body.
+      ...(this.carried.length > 0
+        ? {
+            carried: wheels
+              .map((w) => w.bone)
+              .filter((bone) => this.carried.includes(bone.replace(/_BlendBone$/, ""))),
+          }
+        : {}),
+      ...(levers.length > 0
+        ? { levers, riders: ridersOf(this.floors, wheels, levers) }
+        : {}),
     };
   }
 

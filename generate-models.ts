@@ -25,7 +25,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SparseArchive } from "./lib/archive.js";
-import { readVehicleScripts } from "./lib/script.js";
+import { readVehicleScripts, type VehicleScripts } from "./lib/script.js";
+import { TRACK_SEGMENT } from "./lib/model.js";
 import { VehicleBuilder } from "./lib/vehicle.js";
 import { resolveClient } from "./lib/wgus.js";
 import {
@@ -41,6 +42,7 @@ import { log, readSettings } from "./lib/models/settings.js";
 import {
   accumulate,
   packages,
+  SKIN_FOLDER,
   sweep,
   swept,
   HD_SHARED_PACKAGE,
@@ -54,15 +56,22 @@ const vehicles: Catalogue = new Map();
 /** What each camouflage pattern measured, taken as it was converted. */
 const patterns: Measured = new Map();
 
+/** Whether a swept code is the vehicle asked for, or one of its 3D styles. */
+const isOrDresses = (code: string, only: string) =>
+  code === only || code.startsWith(`${only}/${SKIN_FOLDER}/`);
+
 /** Convert everything the current sweep holds, then empty the scratch tree. */
-async function drain(work: string, converted: Set<string>): Promise<void> {
+async function drain(work: string, converted: Set<string>, scripts: VehicleScripts, last = false): Promise<void> {
   for (const vehicle of swept(work)) {
-    if (settings.only && vehicle.code !== settings.only) continue;
+    // A vehicle's 3D styles come with it: their codes carry the folder they
+    // sit in, so an exact match alone would build the tank and drop the very
+    // styles a single-vehicle run is usually asking to look at.
+    if (settings.only && !isOrDresses(vehicle.code, settings.only)) continue;
     const into = accumulate(vehicles, vehicle);
     try {
       convertCollision(work, vehicle, into, settings);
       if (!settings.collisionOnly) {
-        convertPieces(work, vehicle, into, settings);
+        convertPieces(work, vehicle, into, settings, scripts, last);
         convertTrack(work, vehicle, into, settings);
       }
     } catch (e) {
@@ -78,6 +87,34 @@ async function drain(work: string, converted: Set<string>): Promise<void> {
   }
   // Everything converted has been deleted as it was consumed. What is left is
   // waiting for a file a later package holds, so the tree is not cleared.
+}
+
+/**
+ * Pull the scripts package out ahead of everything else.
+ *
+ * It lives in the `client` part, which is read last, so a vehicle's geometry
+ * would otherwise be converted before anything is known about it. Opened
+ * against its own archive and left in `opened` for the same cleanup as the
+ * rest; the part is walked again in the normal order afterwards, where the
+ * package is a no-op because its files are already on disk.
+ */
+async function sweepScripts(
+  client: Awaited<ReturnType<typeof resolveClient>>,
+  opened: SparseArchive[],
+  work: string,
+): Promise<void> {
+  if (!client) return;
+  const chain = client.getChain("client");
+  if (chain.length === 0) return;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wotmodels-"));
+  const archive = await SparseArchive.open(dir, chain[0].volumes);
+  opened.push(archive);
+  for (const [name, block] of packages(archive, settings)) {
+    if (!SCRIPT_PACKAGE.test(name)) continue;
+    await sweep(archive, block, work, settings);
+    await archive.reset();
+    return;
+  }
 }
 
 async function main(): Promise<void> {
@@ -100,6 +137,15 @@ async function main(): Promise<void> {
   const converted = new Set<string>();
   const opened: SparseArchive[] = [];
   try {
+    // **The scripts come first, before any geometry.** They used to be read at
+    // the end, which was enough while everything they answered was about the
+    // published manifest. A piece's animation is not: the client keeps it in a
+    // prefab and only the scripts say which prefab a gun plays, so a gun
+    // converted before them would be built without its mechanism and never
+    // looked at again. `scripts.pkg` is 23 MB, so reading it up front costs
+    // nothing next to the tiers it now precedes.
+    await sweepScripts(client, opened, work);
+    const scripts = readVehicleScripts(path.join(work, "scripts", "item_defs", "vehicles"));
     for (const part of settings.skipHd ? ["sdcontent", "client"] : ["sdcontent", "hdcontent", "client"]) {
       const chain = client.getChain(part);
       if (chain.length === 0) continue;
@@ -122,7 +168,7 @@ async function main(): Promise<void> {
       const ordered = [...blocks].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b));
       for (const [name, block] of ordered) {
         await sweep(archive, block, work, settings);
-        await drain(work, converted);
+        await drain(work, converted, scripts);
         log(`  ${path.basename(name)} (${(block.packed / 1e6).toFixed(0)} MB block), ${vehicles.size} vehicles so far`);
         // Blocks stay in the sparse volumes once filled, so walking every
         // package would materialise the whole part on disk.
@@ -130,8 +176,11 @@ async function main(): Promise<void> {
       }
     }
 
-    const scripts = readVehicleScripts(path.join(work, "scripts", "item_defs", "vehicles"));
-    log(`${scripts.size} vehicle scripts read`);
+    // Nothing else is coming, so anything still waiting on a file is converted
+    // with whatever it has.
+    await drain(work, converted, scripts, true);
+    const codes = [...scripts.drawnBy.values()].reduce((n, list) => n + list.length, 0);
+    log(`${codes} vehicles read, drawing from ${scripts.drawnBy.size} sets of geometry`);
     const decals = await convertDecals(work, converted, settings);
     if (decals > 0) log(`${decals} decals, marks and stickers`);
     const { vehicles: written, bytes } = await publish(work, converted, scripts, vehicles, patterns, settings);
@@ -146,7 +195,7 @@ async function main(): Promise<void> {
     for (const entry of vehicles.values()) {
       const model = entry.model.build(new Set(), null);
       if (model.tracks) laid++;
-      else if (model.pieces[VehicleBuilder.TRACK_SEGMENT]) linkOnly++;
+      else if (model.pieces[TRACK_SEGMENT]) linkOnly++;
     }
     log(`${laid} vehicles have a real track, ${linkOnly} have a link but no path`);
   } finally {

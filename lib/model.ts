@@ -6,7 +6,7 @@
 // the mirror needs the shape and none of the machinery.
 import type { ChassisWheel } from "./chassis.js";
 import type { Material } from "./material.js";
-import type { PieceCamouflage } from "./script.js";
+import type { PieceCamouflage } from "./pieces.js";
 import type { CustomizationSlot } from "./slots.js";
 import type { Style2D } from "./style.js";
 import type { Wheel } from "./wheels.js";
@@ -22,17 +22,51 @@ export type Piece = {
    * shades parts of the same geometry differently.
    */
   meshes: { name: string; materials: number[] }[];
+  /**
+   * The animations the `.glb` carries, by name, where the piece has a mechanism.
+   *
+   * Absent for all but a handful of vehicles. A viewer needs the name to play
+   * one, and needs to know there is one at all without parsing the file, which
+   * is what this is for: the gun of a vehicle that recalibrates its shells has
+   * a five second `animation` clip and every other gun in the game has none.
+   */
+  clips?: string[];
 };
 
 /**
  * How a vehicle's tracks are drawn.
  *
- * The game lays copies of one link along a closed path around the road wheels
- * and slides them as the vehicle moves, rather than drawing the fixed ribbon
- * that also ships. `segment` names the piece holding that link.
+ * The game lays copies of a link along a closed path around the road wheels and
+ * slides them as the vehicle moves, rather than drawing the fixed ribbon that
+ * also ships.
+ *
+ * **A belt is often two runs, and its pitch is declared rather than measured.**
+ * The chassis names a second link model and gives each run its own start along
+ * the path, so the E 100 lays one model every 300 mm from 144 mm and the other
+ * every 300 mm from 150: two alternating models half a pitch apart, a link
+ * every 150. Spacing links by the mesh's own length instead puts the E 100's
+ * 205 mm apart and leaves every other one missing.
  */
 export type Tracks = {
+  /** The piece holding the link the first run lays. */
   segment: string;
+  /** The piece holding the second run's link, absent on a single-run belt. */
+  segment2?: string;
+  /** Metres between two links of one run, as the chassis declares it. */
+  segmentLength?: number;
+  /** Where the first run starts along the path, in metres. */
+  segmentOffset?: number;
+  /** Where the second run starts along the path, in metres. */
+  segment2Offset?: number;
+  /**
+   * Where the belt hangs at rest, per side, in the order the client chains it.
+   *
+   * The client hangs its track on a chain of nodes and moves them under load,
+   * bounded by the amplitude the chassis declares. These are those nodes in
+   * their rest pose, read off the fixed ribbon they drive, which is the belt
+   * already sitting on the wheels.
+   */
+  nodes?: Record<string, number[][]>;
   /** Closed paths in the vehicle's space, by side, in metres. */
   paths: Record<string, number[][]>;
 };
@@ -130,3 +164,11 @@ export type VehicleModel = {
    */
   wheels?: Wheel[];
 };
+
+/** Name the track link is published under, when the vehicle ships one. */
+export const TRACK_SEGMENT = "TrackSegment";
+
+/** The piece one link model is published under, by the file it came from. */
+export function trackSegment(file: string): string {
+  return `${TRACK_SEGMENT}_${file}`;
+}

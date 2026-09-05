@@ -63,3 +63,51 @@ export function camouflageMaskPath(clientPath: string): string {
   // as one texture and its high-definition twin to everything downstream.
   return clientPath.replace(/(_hd)?\.dds$/i, (_, hd: string | undefined) => `_camo${hd ?? ""}${TEXTURE_EXTENSION}`);
 }
+
+/**
+ * The vehicle's materials as the manifest publishes them.
+ *
+ * A material can name a texture the client no longer ships: the detail and
+ * colour-id maps are referenced by every vehicle but absent from the packages,
+ * so publishing the reference would send a viewer after a file that is not
+ * there. `published` holds the mirror-relative path of every texture written.
+ */
+export function finishMaterials(
+  list: Material[],
+  published: Set<string>,
+): Material[] {
+  // The client ships each texture twice, the second at twice the side under a
+  // `_hd` name. The pair is published side by side and named here, so a
+  // viewer can offer the choice without the manifest describing two vehicles.
+  const highDefinition = (path: string) => path.replace(/\.webp$/, "_hd.webp");
+  const finished = list.map((material) => ({
+    ...material,
+    textures: Object.fromEntries(
+      Object.entries(material.textures)
+        .filter(([, texture]) => published.has(texture.path))
+        .map(([property, texture]) => [
+          property,
+          published.has(highDefinition(texture.path))
+            ? { ...texture, hd: highDefinition(texture.path) }
+            : texture,
+        ]),
+    ),
+  }));
+  
+  // Fill in the ones the client left empty, from the richest material the
+  // vehicle has that is not itself empty. Preferring one whose name shares a
+  // part with theirs keeps a turret with a turret where both exist.
+  const donors = finished.filter((m) => Object.keys(m.textures).length > 0);
+  if (donors.length > 0) {
+    for (const material of finished) {
+      if (Object.keys(material.textures).length > 0) continue;
+      const part = material.name.replace(/^tank_/, "").replace(/_skinned$/, "");
+      const named = donors.find((d) => d.name.includes(part));
+      const donor = named ?? donors.reduce((a, b) => (Object.keys(b.textures).length > Object.keys(a.textures).length ? b : a));
+      material.textures = donor.textures;
+      material.shader = material.shader || donor.shader;
+      material.inheritedFrom = donor.name;
+    }
+  }
+  return finished;
+}

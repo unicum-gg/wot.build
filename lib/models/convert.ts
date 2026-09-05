@@ -17,7 +17,10 @@ import {
 import { texturePath } from "../material.js";
 import { VehicleBuilder } from "../vehicle.js";
 import { log, type Settings } from "./settings.js";
-import type { Accumulated, Vehicle } from "./sweep.js";
+import { SKIN_FOLDER, type Accumulated, type Vehicle } from "./sweep.js";
+import { readPrefabs } from "../sequence.js";
+import type { VehicleScripts } from "../script.js";
+import { trackSegment } from "../model.js";
 
 /**
  * What a camouflage pattern measured, taken as it is converted.
@@ -79,20 +82,48 @@ export function convertCollision(work: string, vehicle: Vehicle, into: Accumulat
  * So a file that has not found its other half stays in the scratch tree until a
  * later package brings it, and only converted pairs are dropped.
  */
-export function convertPieces(work: string, vehicle: Vehicle, into: Accumulated, settings: Settings): void {
+export function convertPieces(
+  work: string,
+  vehicle: Vehicle,
+  into: Accumulated,
+  settings: Settings,
+  scripts?: VehicleScripts,
+  last = false,
+): void {
   const dir = path.join(work, "vehicles", vehicle.nation, vehicle.code, "normal", "lod0");
   if (!fs.existsSync(dir)) return;
+  // A 3D style wears its parent's mechanism: the animation is keyed on node
+  // names, and a style ships the same skeleton under a folder of its own.
+  const parent = vehicle.code.split(`/${SKIN_FOLDER}/`)[0];
+  const script = scripts?.scripts.get(`${vehicle.nation}/${parent}`);
   for (const file of fs.readdirSync(dir).sort()) {
     if (!file.endsWith(".visual_processed")) continue;
     const name = path.basename(file, ".visual_processed");
     const visual = path.join(dir, file);
     const primitives = path.join(dir, `${name}.primitives_processed`);
     if (!fs.existsSync(primitives)) continue;
+    const wanted = [
+      ...(script?.prefabs[name] ?? []),
+      // And whatever the vehicle names for itself rather than for a piece.
+      // Their curves name nodes, so the ones this piece does not have fall away
+      // and a stance belonging to the hull does not end up on the gun.
+      ...(script?.prefabs[""] ?? []),
+    ];
+    // **A piece waits for its mechanism, the way it waits for its geometry.**
+    // The client splits a vehicle across the packages of its tier, and a prefab
+    // is no more guaranteed to travel with the mesh it moves than a
+    // `.primitives_processed` is. Converted early, the piece would be written
+    // without its animation and never looked at again, so it stays in the
+    // scratch tree until a later package brings the file. `last` is the sweep
+    // saying there is no later package: whatever is still missing is missing
+    // for good, and a piece without its mechanism beats no piece at all.
+    if (!last && wanted.some((at) => !fs.existsSync(path.join(work, at)))) continue;
+    const clips = readPrefabs(work, wanted);
     // Each piece stands on its own. A hull the reader chokes on used to take
     // the turret and the gun down with it, leaving a vehicle that looks merely
     // incomplete rather than broken, and says nothing about which piece failed.
     try {
-      const glb = into.model.add(name, fs.readFileSync(visual), fs.readFileSync(primitives));
+      const glb = into.model.add(name, fs.readFileSync(visual), fs.readFileSync(primitives), clips);
       if (glb) fs.writeFileSync(path.join(vehicleOut(vehicle, settings), `${name}.glb`), glb);
     } catch (e) {
       log(`  ! ${vehicle.nation}/${vehicle.code} ${name}: ${(e as Error).message}`);
@@ -124,8 +155,13 @@ export function convertTrack(work: string, vehicle: Vehicle, into: Accumulated, 
     const primitives = path.join(dir, `${name}.primitives_processed`);
     if (!fs.existsSync(primitives)) continue;
     try {
-      const glb = into.model.add(VehicleBuilder.TRACK_SEGMENT, fs.readFileSync(full), fs.readFileSync(primitives));
-      if (glb) fs.writeFileSync(path.join(vehicleOut(vehicle, settings), `${VehicleBuilder.TRACK_SEGMENT}.glb`), glb);
+      // **Named after the file it came from, not after the slot.** A belt is
+      // often two runs of two different links, and both live here: written
+      // under one name the second simply overwrote the first, and which of the
+      // pair survived was decided by the order the folder happened to list.
+      const piece = trackSegment(name);
+      const glb = into.model.add(piece, fs.readFileSync(full), fs.readFileSync(primitives));
+      if (glb) fs.writeFileSync(path.join(vehicleOut(vehicle, settings), `${piece}.glb`), glb);
     } catch (e) {
       log(`  ! ${vehicle.nation}/${vehicle.code} track link: ${(e as Error).message}`);
     }
