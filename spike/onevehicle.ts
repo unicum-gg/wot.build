@@ -11,12 +11,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { mergeShapes, readCollision } from "../lib/collision.js";
-import { readVehicleIdentity, readVehicleScripts } from "../lib/script.js";
+import { readVehicleIdentity } from "../lib/identity.js";
+import { readVehicleScripts } from "../lib/script.js";
+import { readPrefabs } from "../lib/sequence.js";
 import type { ChassisWheel } from "../lib/chassis.js";
 import { readTrackPath } from "../lib/track.js";
 import { texturePath } from "../lib/material.js";
 import { VehicleBuilder } from "../lib/vehicle.js";
-import type { VehicleModel } from "../lib/model.js";
+import { trackSegment, type VehicleModel } from "../lib/model.js";
 import { convertCamouflage, convertTexture, TextureQuality } from "../lib/texture.js";
 import { readSkinMarks, readStyles, type Style2D } from "../lib/style.js";
 import { nameFor, readCatalogue } from "../lib/localization.js";
@@ -68,7 +70,14 @@ async function convertSet(from: string, into: string, wheels: Record<string, Cha
     const lod0 = pieces.get(name)!;
     const prim = path.join(lod0, `${name}.primitives_processed`);
     if (!fs.existsSync(prim)) continue;
-    const glb = builder.add(name, fs.readFileSync(path.join(lod0, `${name}.visual_processed`)), fs.readFileSync(prim));
+    // The mechanism the piece works, where the script names one. A style wears
+    // its parent's: the clips are keyed on node names and a style ships the
+    // same skeleton.
+    const clips = readPrefabs(sources, [
+      ...(script?.prefabs[name] ?? []),
+      ...(script?.prefabs[""] ?? []),
+    ]);
+    const glb = builder.add(name, fs.readFileSync(path.join(lod0, `${name}.visual_processed`)), fs.readFileSync(prim), clips);
     if (glb) fs.writeFileSync(path.join(into, `${name}.glb`), glb);
   }
 
@@ -92,11 +101,17 @@ async function convertSet(from: string, into: string, wheels: Record<string, Cha
       // link, which the viewer answers by drawing a plain ribbon. Any visual in
       // this folder is the link, which is what the catalogue generator has
       // always done.
+      // **Each link under its own name.** A belt is laid from two models on
+      // most vehicles, interleaved half a link apart, and writing both under
+      // one name left the second overwriting the first: one model laid at
+      // twice its real spacing, which is the gap seen at the back of the hull.
       if (file.endsWith(".visual_processed")) {
-        const prim = path.join(trackDir, `${path.basename(file, ".visual_processed")}.primitives_processed`);
+        const stem = path.basename(file, ".visual_processed");
+        const prim = path.join(trackDir, `${stem}.primitives_processed`);
         if (!fs.existsSync(prim)) continue;
-        const glb = builder.add(VehicleBuilder.TRACK_SEGMENT, fs.readFileSync(full), fs.readFileSync(prim));
-        if (glb) fs.writeFileSync(path.join(into, `${VehicleBuilder.TRACK_SEGMENT}.glb`), glb);
+        const piece = trackSegment(stem);
+        const glb = builder.add(piece, fs.readFileSync(full), fs.readFileSync(prim));
+        if (glb) fs.writeFileSync(path.join(into, `${piece}.glb`), glb);
       }
     }
   }
@@ -134,6 +149,10 @@ async function convertSet(from: string, into: string, wheels: Record<string, Cha
   }
 
   builder.declareWheels(wheels);
+  // How the client lays the belt: the two link models, the spacing between
+  // them and where each run starts. Without it the belt falls back to one
+  // model at the length of its own bounding box.
+  builder.declareSpline(script?.spline ?? null, script?.chain ?? null);
   // Exactly what was written, so a material naming anything else has its entry
   // dropped rather than pointing at a file that is not there.
   const model = builder.build(new Set(converted), hullPosition);
@@ -150,7 +169,7 @@ if (fs.existsSync(collisionDir)) {
 }
 
 const scripts = readVehicleScripts(path.join(sources, "scripts", "item_defs", "vehicles"));
-const script = scripts.get(content);
+const script = scripts.scripts.get(content);
 const customization = path.join(sources, "scripts", "item_defs", "customization");
 const identity = readVehicleIdentity(path.join(sources, "scripts", "item_defs", "vehicles"), code);
 
@@ -251,40 +270,44 @@ async function writeStyles(into: string): Promise<Style2D[]> {
    * and how many of its channels are weights.
    */
   const patterns = new Map<string, { size: [number, number]; weights: 3 | 4 }>();
+  /**
+   * Publish one of the client's textures, once, and give back its path.
+   *
+   * The stickers, the lettering and the maps that finish a coat all live where
+   * the client keeps them rather than under a vehicle: the same few hundred
+   * serve the whole catalogue, so each is converted the first time it is asked
+   * for and named from the cache after that. Null for one the packages do not
+   * carry, which is a decal dropped and a finish map simply gone without.
+   */
+  const publishTexture = async (at: string | null): Promise<string | null> => {
+    if (!at) return null;
+    const dds = path.join(sources, at);
+    if (!fs.existsSync(dds)) return null;
+    const to = texturePath(at);
+    if (!written.has(at)) {
+      const file = path.join(out, to);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      await convertTexture(dds, file, undefined, TextureQuality.High);
+      written.set(at, to);
+    }
+    return to;
+  };
   const kept: Style2D[] = [];
   for (const style of styles) {
     const outfits = [];
     for (let outfit of style.outfits) {
-      // The stickers and the lettering, published where the client keeps them:
-      // the same few hundred serve every vehicle in the catalogue.
+      // The stickers and the lettering, and the decals projected into the
+      // vehicle's own slots, which come from the same folder and are published
+      // the same way.
       const decals = [];
       for (const decal of outfit.decals) {
-        const dds = path.join(sources, decal.texture);
-        if (!fs.existsSync(dds)) continue;
-        const at = texturePath(decal.texture);
-        if (!written.has(decal.texture)) {
-          const file = path.join(out, at);
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          await convertTexture(dds, file, undefined, TextureQuality.High);
-          written.set(decal.texture, at);
-        }
-        decals.push({ ...decal, texture: at });
+        const at = await publishTexture(decal.texture);
+        if (at) decals.push({ ...decal, texture: at });
       }
-      // A style that brings its own marks of excellence brings the files too.
-      // The decals projected into the vehicle's own slots, published the same
-      // way and from the same folder as the stickers.
       const projected = [];
       for (const decal of outfit.projected) {
-        const dds = path.join(sources, decal.texture);
-        if (!fs.existsSync(dds)) continue;
-        const at = texturePath(decal.texture);
-        if (!written.has(decal.texture)) {
-          const file = path.join(out, at);
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          await convertTexture(dds, file, undefined, TextureQuality.High);
-          written.set(decal.texture, at);
-        }
-        projected.push({ ...decal, texture: at });
+        const at = await publishTexture(decal.texture);
+        if (at) projected.push({ ...decal, texture: at });
       }
       outfit = { ...outfit, decals, projected, marks: await writeMarks(outfit.marks) };
       // Every camouflage the outfit names, since a style can dress a hull, a
@@ -306,22 +329,9 @@ async function writeStyles(into: string): Promise<Style2D[]> {
         // The maps that give the coat its finish, published beside the pattern.
         // A camouflage that names one the packages do not carry simply goes
         // without it rather than being dropped: the pattern is what it is.
-        const finish = async (at: string | null) => {
-          if (!at) return null;
-          const dds = path.join(sources, at);
-          if (!fs.existsSync(dds)) return null;
-          const to = texturePath(at);
-          if (!written.has(at)) {
-            const file = path.join(out, to);
-            fs.mkdirSync(path.dirname(file), { recursive: true });
-            await convertTexture(dds, file, undefined, TextureQuality.High);
-            written.set(at, to);
-          }
-          return to;
-        };
-        const glossMetallicMap = await finish(camouflage.glossMetallicMap);
-        const normalMap = await finish(camouflage.normal?.texture ?? null);
-        const emissionMap = await finish(camouflage.emission?.texture ?? null);
+        const glossMetallicMap = await publishTexture(camouflage.glossMetallicMap);
+        const normalMap = await publishTexture(camouflage.normal?.texture ?? null);
+        const emissionMap = await publishTexture(camouflage.emission?.texture ?? null);
         worn.push({
           ...camouflage,
           texture: written.get(camouflage.texture)!,

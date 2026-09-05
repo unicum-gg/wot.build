@@ -11,12 +11,13 @@
 // and a pattern rather than a pile of ids to chase.
 import fs from "node:fs";
 import path from "node:path";
+import { nameFor } from "./localization.js";
 import { decodePacked, type PackedNode } from "./packed.js";
 import { DECAL_SCALE_FACTORS, readDecals, readProjectionDecals, type StyleDecal, type StyleProjectionDecal } from "./decal.js";
 import { readPaints, regionsOf, repaint, StylePart, type StylePaint } from "./paint.js";
 import { offeredOn, readCamouflages, type CamouflageColor } from "./camouflage.js";
 import { readInsignia } from "./insignia.js";
-import { type VehicleIdentity } from "./script.js";
+import { type VehicleIdentity } from "./identity.js";
 import { child, children, text } from "./read.js";
 
 export type StyleCamouflage = {
@@ -265,6 +266,49 @@ function wear(source: ReturnType<typeof readCamouflages>[number], item: PackedNo
  * together: `R45_IS-7_BPXVIII_3Dst` is both the folder and the last part of the
  * key the style names itself with.
  */
+/**
+ * What each 3D style is called, by the model set it swaps in.
+ *
+ * A 3D style lives in the same customization files as a 2D one and is told
+ * apart by its `c11n3D` tag. `modelsSet` is exactly the folder the mirror
+ * publishes it under, `A120_M48A5_3DSt_TLXXL`, and `userString` is the key the
+ * game shows a player. Without this a wardrobe offers folder names.
+ *
+ * Keyed by the model set rather than by vehicle: a style names one set and the
+ * set is unique, so one table serves the whole catalogue.
+ */
+/** What a 3D style is called and what the client pictures it with. */
+export type SkinFace = { name: string; icon: string };
+
+/**
+ * Every 3D style, by the folder of models it dresses a vehicle in.
+ *
+ * **The picture is read, never guessed from the folder.** A style's folder is
+ * whatever the artist called the set, and a third of them are named after the
+ * occasion rather than the style: `battlepass2020` is "Storm", `halloween` is
+ * "Revenant", `SD` is "Immortal Classics". The catalogue names the swatch
+ * itself, in the same `texture` node a 2D style uses, so it is taken from there
+ * like everything else here.
+ */
+export function readSkinNames(root: string, names: Map<string, string>): Record<string, SkinFace> {
+  const dir = path.join(root, "styles");
+  if (!fs.existsSync(dir)) return {};
+  const out: Record<string, SkinFace> = {};
+  for (const file of fs.readdirSync(dir).sort()) {
+    for (const style of everyStyle(decodePacked(fs.readFileSync(path.join(dir, file))))) {
+      if (!text(child(style, "tags")).split(/\s+/).includes("c11n3D")) continue;
+      const set = text(child(style, "modelsSet"));
+      const key = text(child(style, "userString"));
+      if (!set || out[set]) continue;
+      const named = nameFor(key, names);
+      // A key the catalogue has nothing for resolves to itself, and a folder
+      // name is no better than the one the reader already had.
+      if (named && named !== key) out[set] = { name: named, icon: text(child(style, "texture")) };
+    }
+  }
+  return out;
+}
+
 export function readSkinMarks(root: string, skin: string): string[] {
   const dir = path.join(root, "styles");
   if (!fs.existsSync(dir)) return [];
