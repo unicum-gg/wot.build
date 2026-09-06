@@ -41,8 +41,10 @@ env:
 jobs:
   models:
     runs-on: ubuntu-latest
-    # A release branch measured 2h55. The ceiling is the six hours a job gets.
-    timeout-minutes: 340
+    # A release branch measured 5h07 on a runner, against the six hours a job
+    # gets. What is left after that is for the pushes, so this sits as close to
+    # the ceiling as it can: the first seed died with half an hour of headroom.
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -97,6 +99,18 @@ jobs:
           git checkout --orphan "${{ matrix.branch }}"
           git rm -rq --cached . || true
           find . -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+
+      # **Before five hours of work, not after.** The first seed generated the
+      # whole mirror and then found the token could not write to it, which is a
+      # runner-day for a permission that takes a second to read.
+      - name: Check the token can write to the mirror
+        run: |
+          can=$(curl -sf -H "Authorization: Bearer ${{ secrets.SYNC_PAT }}" \
+            "https://api.github.com/repos/${TARGET}" | jq -r '.permissions.push // false')
+          if [ "$can" != "true" ]; then
+            echo "::error::SYNC_PAT cannot push to ${TARGET}. A fine-grained token lists the repositories it may touch, and this one is not on the list."
+            exit 1
+          fi
 
       - name: Generate (no-op if the client version is unchanged)
         run: npm run models -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out ${{ inputs.force && '--force' || '' }} ${{ inputs.skins && '--skins' || '' }}
