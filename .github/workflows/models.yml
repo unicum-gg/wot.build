@@ -100,17 +100,31 @@ jobs:
           git rm -rq --cached . || true
           find . -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
 
-      # **Before five hours of work, not after.** The first seed generated the
-      # whole mirror and then found the token could not write to it, which is a
+      # **Before five hours of work, not after.** A seed generated the whole
+      # mirror and then found the token could not write to it, which is a
       # runner-day for a permission that takes a second to read.
+      #
+      # **Asked of the write path itself.** Reading `permissions.push` off the
+      # repository answers for the human the token belongs to, not for the
+      # token: a fine-grained one that was never granted this repository still
+      # reports its owner's push rights, so that check went green and the push
+      # was refused five hours later all the same. Creating a ref that already
+      # exists is refused for the right reason instead: 422 where the token may
+      # write, 403 where it may not, and nothing changes either way.
       - name: Check the token can write to the mirror
         run: |
-          can=$(curl -sf -H "Authorization: Bearer ${{ secrets.SYNC_PAT }}" \
-            "https://api.github.com/repos/${TARGET}" | jq -r '.permissions.push // false')
-          if [ "$can" != "true" ]; then
-            echo "::error::SYNC_PAT cannot push to ${TARGET}. A fine-grained token lists the repositories it may touch, and this one is not on the list."
-            exit 1
-          fi
+          sha=$(curl -sf -H "Authorization: Bearer ${{ secrets.SYNC_PAT }}" \
+            "https://api.github.com/repos/${TARGET}/git/ref/heads/main" | jq -r .object.sha)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${{ secrets.SYNC_PAT }}" \
+            "https://api.github.com/repos/${TARGET}/git/refs" \
+            -d "{\"ref\":\"refs/heads/main\",\"sha\":\"${sha}\"}")
+          case "$code" in
+            422|201) echo "SYNC_PAT can write to ${TARGET}" ;;
+            *)
+              echo "::error::SYNC_PAT cannot write to ${TARGET} (HTTP ${code}). A fine-grained token lists the repositories it may touch and the permissions it has on them: add this one, with Contents read and write."
+              exit 1 ;;
+          esac
 
       - name: Generate (no-op if the client version is unchanged)
         run: npm run models -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out ${{ inputs.force && '--force' || '' }} ${{ inputs.skins && '--skins' || '' }}
