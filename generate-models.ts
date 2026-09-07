@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { SparseArchive } from "./lib/archive.js";
 import { readVehicleScripts, type VehicleScripts } from "./lib/script.js";
+import { indexPaths } from "./lib/material.js";
 import { TRACK_SEGMENT } from "./lib/model.js";
 import { VehicleBuilder } from "./lib/vehicle.js";
 import { resolveClient } from "./lib/wgus.js";
@@ -80,7 +81,7 @@ async function drain(work: string, converted: Set<string>, scripts: VehicleScrip
   }
   if (!settings.collisionOnly) {
     const referenced = settings.only
-      ? new Set([...vehicles.values()].flatMap((v) => [...v.model.textures]))
+      ? indexPaths([...vehicles.values()].flatMap((v) => [...v.model.textures]))
       : undefined;
     const textures = await convertTextures(work, converted, patterns, settings, referenced);
     if (textures > 0) log(`  ${textures} textures`);
@@ -193,7 +194,7 @@ async function main(): Promise<void> {
     let laid = 0;
     let linkOnly = 0;
     for (const entry of vehicles.values()) {
-      const model = entry.model.build(new Set(), null);
+      const model = entry.model.build(indexPaths([]), null);
       if (model.tracks) laid++;
       else if (model.pieces[TRACK_SEGMENT]) linkOnly++;
     }

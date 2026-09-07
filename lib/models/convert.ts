@@ -14,7 +14,7 @@ import {
   TextureQuality,
   TextureRole,
 } from "../texture.js";
-import { texturePath } from "../material.js";
+import { texturePath, type PathIndex } from "../material.js";
 import { VehicleBuilder } from "../vehicle.js";
 import { log, type Settings } from "./settings.js";
 import { SKIN_FOLDER, type Accumulated, type Vehicle } from "./sweep.js";
@@ -184,7 +184,7 @@ export async function convertTextures(
   into: Set<string>,
   measured: Measured,
   settings: Settings,
-  wanted?: Set<string>,
+  wanted?: PathIndex,
 ): Promise<number> {
   const root = path.join(work, "vehicles");
   if (!fs.existsSync(root)) return 0;
@@ -201,6 +201,8 @@ export async function convertTextures(
       // A high-definition texture is the same texture at twice the side, so it
       // is wanted exactly when the standard one is: match on the name without
       // the suffix, or a single-vehicle run would drop every `_hd` it swept.
+      // The match itself is folded, because a material's spelling of a path is
+      // not always the file's own.
       const hd = relative.endsWith("_hd.dds");
       const asked = hd ? relative.replace(/_hd\.dds$/, ".dds") : relative;
       if (NON_TEXTURE.test(entry.name)) {

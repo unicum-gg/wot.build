@@ -14,7 +14,7 @@ import type { VehicleScripts } from "../script.js";
 import { readSkinNames, type Style2D } from "../style.js";
 import { wearableStyles } from "./wearable.js";
 import { patternWeights } from "../texture.js";
-import { texturePath } from "../material.js";
+import { indexPaths, texturePath } from "../material.js";
 import type { VehicleModel } from "../model.js";
 import { fold } from "./catalogue.js";
 import { SKIN_FOLDER, type Catalogue } from "./sweep.js";
@@ -33,7 +33,7 @@ export async function publish(
   patterns: Measured,
   settings: Settings,
 ): Promise<{ vehicles: number; bytes: number }> {
-  const published = new Set([...converted].map(texturePath));
+  const published = indexPaths([...converted].map(texturePath));
   const vehicleScripts = path.join(work, "scripts", "item_defs", "vehicles");
   const customization = path.join(work, "scripts", "item_defs", "customization");
   // A style names itself with a key. Without the catalogue a viewer offers
@@ -159,7 +159,9 @@ export async function publish(
       const identity = skin ? null : readVehicleIdentity(vehicleScripts, code);
       if (identity) {
         model.camouflageDensity = identity.density;
-        const marks = readMarks(customization, identity.nation).map(texturePath).filter((at) => published.has(at));
+        const marks = readMarks(customization, identity.nation)
+          .map((at) => published.at(texturePath(at)))
+          .filter((at): at is string => at !== null);
         if (marks.length > 0) model.marks = marks;
         // The 2D styles, each a recipe naming a camouflage, some paint and some
         // decals. Kept out of the manifest because it is a long list nothing

@@ -16,7 +16,7 @@ import { readVehicleScripts } from "../lib/script.js";
 import { readPrefabs } from "../lib/sequence.js";
 import type { ChassisWheel } from "../lib/chassis.js";
 import { readTrackPath } from "../lib/track.js";
-import { texturePath } from "../lib/material.js";
+import { indexPaths, texturePath } from "../lib/material.js";
 import { VehicleBuilder } from "../lib/vehicle.js";
 import { trackSegment, type VehicleModel } from "../lib/model.js";
 import { convertCamouflage, convertTexture, TextureQuality } from "../lib/texture.js";
@@ -155,7 +155,7 @@ async function convertSet(from: string, into: string, wheels: Record<string, Cha
   builder.declareSpline(script?.spline ?? null, script?.chain ?? null);
   // Exactly what was written, so a material naming anything else has its entry
   // dropped rather than pointing at a file that is not there.
-  const model = builder.build(new Set(converted), hullPosition);
+  const model = builder.build(indexPaths(converted), hullPosition);
   return model;
 }
 

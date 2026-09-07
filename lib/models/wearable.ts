@@ -8,7 +8,7 @@
 // caps it.
 import fs from "node:fs";
 import { nameFor } from "../localization.js";
-import { texturePath } from "../material.js";
+import { texturePath, type PathIndex } from "../material.js";
 import { readStyles, type Style2D } from "../style.js";
 import type { VehicleIdentity } from "../identity.js";
 import type { Measured } from "./convert.js";
@@ -16,7 +16,7 @@ import type { Measured } from "./convert.js";
 export function wearableStyles(
   identity: VehicleIdentity | null,
   /** Every texture the mirror actually wrote, by its published path. */
-  have: Set<string>,
+  have: PathIndex,
   { customization, patterns, names }: {
     /** The client's customization tree, where the styles are declared. */
     customization: string;
@@ -28,6 +28,13 @@ export function wearableStyles(
 ): Style2D[] {
   if (!identity || !fs.existsSync(customization)) return [];
   const out: Style2D[] = [];
+  // The mirror's own spelling of a texture, or null where it carries none.
+  //
+  // Resolved rather than checked: the client's spelling of a path is not always
+  // the one the file was written under, and it is the written one a viewer has
+  // to ask for. One the packages do not carry is dropped rather than left
+  // pointing at a file that is not there.
+  const kept = (at: string | null) => (at ? have.at(texturePath(at)) : null);
   for (const style of readStyles(customization, identity)) {
     const outfits = style.outfits
       .map((outfit) => ({
@@ -36,14 +43,12 @@ export function wearableStyles(
         // it travels with the pattern.
         camouflages: outfit.camouflages.map((c) => {
           // The finish maps share the pattern's folder and are published the
-          // same way. One the packages do not carry is dropped rather than
-          // left pointing at a file that is not there.
-          const kept = (at: string | null) => (at && have.has(texturePath(at)) ? texturePath(at) : null);
+          // same way.
           const normal = kept(c.normal?.texture ?? null);
           const emission = kept(c.emission?.texture ?? null);
           return {
             ...c,
-            texture: texturePath(c.texture),
+            texture: kept(c.texture) ?? texturePath(c.texture),
             size: patterns.get(c.texture)?.size ?? null,
             weights: patterns.get(c.texture)?.weights ?? 4,
             glossMetallicMap: kept(c.glossMetallicMap),
@@ -51,8 +56,8 @@ export function wearableStyles(
             emission: emission && c.emission ? { ...c.emission, texture: emission } : null,
           };
         }),
-        decals: outfit.decals.map((d) => ({ ...d, texture: texturePath(d.texture) })),
-        projected: outfit.projected.map((d) => ({ ...d, texture: texturePath(d.texture) })),
+        decals: outfit.decals.map((d) => ({ ...d, texture: kept(d.texture) ?? texturePath(d.texture) })),
+        projected: outfit.projected.map((d) => ({ ...d, texture: kept(d.texture) ?? texturePath(d.texture) })),
       }))
       // A style whose pattern the packages do not carry cannot be shown.
       .filter(

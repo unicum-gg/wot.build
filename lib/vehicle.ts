@@ -27,6 +27,7 @@ import {
   SRGB_PROPERTIES,
   texturePath,
   type Material,
+  type PathIndex,
 } from "./material.js";
 import { MirrorFeature, type Piece, type VehicleModel } from "./model.js";
 import { hardpoints, place, placements, readVisual, tree, type Placement, type VisualMaterial, type VisualRenderSet } from "./visual.js";
@@ -263,7 +264,7 @@ export class VehicleBuilder {
    * so publishing the reference would send a viewer after a file that is not
    * there. `published` holds the mirror-relative path of every texture written.
    */
-  build(published: Set<string>, hullPosition: number[] | null): VehicleModel {
+  build(published: PathIndex, hullPosition: number[] | null): VehicleModel {
     const materials = finishMaterials(this.materials, published);
     // The script is the authority on how big a wheel is; the mesh only says
     // where it is. Its names are the tree's, without the `_BlendBone` the skin
