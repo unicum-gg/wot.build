@@ -168,3 +168,39 @@ jobs:
           git add -A
           send
           if [ "$sent" -eq 0 ]; then echo "no changes for ${VERSION_BRANCH}"; fi
+
+  warm:
+    # Filling jsDelivr with what was just published, so that the first reader
+    # after a rebuild is not the one who waits for it.
+    #
+    # **A job of its own rather than a last step.** The generation runs to five
+    # hours against a timeout of 350 minutes, and there is no room left in that
+    # budget for twenty minutes of anything else: a pass added on the end would
+    # be the thing that gets cut when a client update runs long, which is
+    # exactly the run that needs it most.
+    #
+    # **Only the branches the site serves.** WG is what a tank page reads and
+    # WG_CT what it reads for a vehicle on the test client. Lesta and Lesta_PT
+    # are mirrored so the history exists, but no reader asks for them, and
+    # warming a branch nobody opens spends jsDelivr's origin bandwidth on
+    # nothing.
+    needs: models
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Warm the branches the site reads
+        env:
+          # For resolving each branch to the commit a reader is served, which
+          # is anonymous at 60 an hour on an address shared with every other
+          # job on the runner.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run warm -- --branch WG --branch WG_CT
