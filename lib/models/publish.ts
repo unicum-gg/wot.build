@@ -27,6 +27,72 @@ import { log, type Settings } from "./settings.js";
 const PLACEHOLDER = /_Placeholder$/;
 
 /**
+ * Drop the materials no piece draws with, renumbering the ones that stay.
+ *
+ * **Grafting appends a whole list to keep the arithmetic simple**, and a
+ * manifest that is grafted into on run after run would carry the donor's list
+ * again every time: a vehicle whose pieces arrive from two packages would grow
+ * its material list at every incremental build until it is mostly dead weight.
+ * A material is reachable only through a mesh, so what nothing names can go.
+ */
+function compact(model: VehicleModel): void {
+  const used = new Map<number, number>();
+  for (const piece of Object.values(model.pieces)) {
+    for (const mesh of piece.meshes) {
+      for (const index of mesh.materials) {
+        if (!used.has(index)) used.set(index, used.size);
+      }
+    }
+  }
+  if (used.size === model.materials.length) return;
+  const kept = [...used.keys()].map((index) => model.materials[index]);
+  for (const piece of Object.values(model.pieces)) {
+    for (const mesh of piece.meshes) {
+      mesh.materials = mesh.materials.map((index) => used.get(index) ?? 0);
+    }
+  }
+  model.materials = kept;
+}
+
+/** A manifest already on the mirror, or null where there is none to read. */
+function readManifest(at: string): VehicleModel | null {
+  try {
+    return JSON.parse(fs.readFileSync(at, "utf8")) as VehicleModel;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Copy pieces from another manifest into this one.
+ *
+ * **The material index is the whole difficulty.** A mesh names its material by
+ * position in its own manifest's list, so a piece moved between two manifests
+ * keeps a number that now points at something else: a track drawn with a gun's
+ * paint, a hull with a turret's. The donor's list is appended and the grafted
+ * indices are shifted by where it starts.
+ *
+ * `from` is how the copied files are reached from the manifest being written,
+ * empty where both sit in the same folder.
+ */
+function graft(model: VehicleModel, donor: VehicleModel, pieces: string[], from = ""): void {
+  if (pieces.length === 0) return;
+  const offset = model.materials.length;
+  model.materials = [...model.materials, ...donor.materials];
+  for (const name of pieces) {
+    const piece = structuredClone(donor.pieces[name]);
+    model.pieces[name] = {
+      ...piece,
+      glb: from ? `${from}/${piece.glb}` : piece.glb,
+      meshes: piece.meshes.map((mesh) => ({
+        ...mesh,
+        materials: mesh.materials.map((index) => index + offset),
+      })),
+    };
+  }
+}
+
+/**
  * Every texture the mirror already carries, by the path a material names it at.
  *
  * Walked rather than remembered: the mirror is a git checkout of a branch, so
@@ -34,7 +100,13 @@ const PLACEHOLDER = /_Placeholder$/;
  * nothing has to be kept in step with it.
  */
 function mirrored(out: string): string[] {
-  const root = path.join(out, "vehicles");
+  // **The whole mirror, not its vehicles.** A material names a texture from the
+  // root, and plenty of them sit outside `vehicles/`: the marks of excellence
+  // and every sticker live under `gui/maps/vehicles/decals`, which arrive in
+  // their own packages. Walked from `vehicles/` alone, a run that did not sweep
+  // those packages could not resolve a single mark, and every vehicle it
+  // rebuilt was published with none, silently, having had them the run before.
+  const root = out;
   if (!fs.existsSync(root)) return [];
   const found: string[] = [];
   const walk = (dir: string): void => {
@@ -72,6 +144,11 @@ export async function publish(
   // A style names itself with a key. Without the catalogue a viewer offers
   // `generic_custom_look_ussr` where the game offers "Made in the U.S.S.R.".
   const names = await readCatalogue("vehicle_customization").catch(() => new Map<string, string>());
+  // Read once, before anything is written: it answers two questions in this
+  // file, which vehicle wears what and which model sets belong to nobody else.
+  const locked = readLockedStyles(customization);
+  /** The sets a vehicle is issued wearing, whichever vehicle that is. */
+  const issued = new Set(locked.map((l) => l.models).filter(Boolean));
   /** One vehicle's 2D styles, resolved and kept only where the mirror has them. */
   /** Every style the mirror publishes, written once at the root. */
   const catalogue = new Map<number, Style2D>();
@@ -187,8 +264,15 @@ export async function publish(
       const camouflage = Object.entries(worn?.camouflage ?? {}).filter(([piece]) => model.pieces[piece]);
       if (camouflage.length > 0) model.camouflage = Object.fromEntries(camouflage);
 
-      const styles = dressed.get(key);
-      if (styles) model.skins = styles.sort();
+      // **What this vehicle may be dressed in, which is not everything sitting
+      // in its `_skins` folder.** A style locked onto a vehicle is published
+      // under the geometry that vehicle borrows, so the Monkey King's livery
+      // lands beside the plain 121B's meshes and offering the folder's contents
+      // as they are puts a style in the 121B's wardrobe that the game gives
+      // only to another tank. The vehicle wearing it reaches it through
+      // `worn.json` instead, which is not a choice anyone makes.
+      const styles = (dressed.get(key) ?? []).filter((set) => !issued.has(set));
+      if (styles.length > 0) model.skins = styles.sort();
       const identity = skin ? null : readVehicleIdentity(vehicleScripts, code);
       if (identity) {
         model.camouflageDensity = identity.density;
@@ -211,6 +295,50 @@ export async function publish(
             fold(catalogue, styles, (why) => log(`  ! ${nation}/${code}: ${why}`)),
           ]);
         }
+      }
+      // **A material that lost every texture is borrowed from, and that is worth
+      // saying out loud.** `finishMaterials` fills an empty one from the
+      // richest material the vehicle has, which is right for the ones the
+      // client ships empty and is a quiet lie when the textures were simply not
+      // swept: a track whose maps live in a package this run skipped comes back
+      // painted like the gun, which draws a belt nobody can see rather than no
+      // belt at all. Named here because the manifest is where it lands.
+      const borrowed = model.materials.filter((material) => material.inheritedFrom);
+      if (borrowed.length > 0) {
+        log(
+          `  ? ${key}: ${borrowed.length} material(s) took another's textures (${borrowed
+            .map((m) => `${m.name} <- ${m.inheritedFrom}`)
+            .join(", ")})`,
+        );
+      }
+      // **A run never takes a piece off a vehicle the mirror already has.**
+      //
+      // The pieces of one vehicle are not all in one package: the Erlang Shen's
+      // style keeps its chassis with the tier and its hull, turret and gun in
+      // `particles.pkg`. A run that swept one of those and skipped the other,
+      // which is exactly what an incremental run does, rebuilds the vehicle out
+      // of the half it saw. Written over the manifest, that silently publishes
+      // a tank with no hull, and nothing says so: the file is valid, the viewer
+      // draws what it is given.
+      //
+      // So what was published stays unless this run has something to put in its
+      // place. The cost is that a piece the game really removed survives until
+      // a full `--force` rebuild, which is the trade the tournament mirror makes
+      // for the same reason: a gap that repairs itself beats a hole nobody sees.
+      const held = readManifest(path.join(dir, "model.json"));
+      if (held) {
+        graft(model, held, Object.keys(held.pieces).filter((piece) => !model.pieces[piece]));
+        // **And everything else a piece carries with it.** A slot says where a
+        // mark or an emblem goes and is read from the piece's own visual, so a
+        // run that did not sweep the gun publishes a vehicle with nowhere to put
+        // its marks of excellence: the mark is named, the texture is never even
+        // fetched, and the control does nothing. The camouflage measurements are
+        // per piece for the same reason.
+        model.slots = { ...held.slots, ...model.slots };
+        model.camouflage = { ...held.camouflage, ...model.camouflage };
+        if (!Object.keys(model.slots).length) delete model.slots;
+        if (!Object.keys(model.camouflage).length) delete model.camouflage;
+        compact(model);
       }
       files.push(["model.json", model]);
       // Indexed on the model, not on the vehicle: six of the catalogue's
@@ -357,6 +485,92 @@ export async function publish(
     fs.writeFileSync(at, JSON.stringify(model));
   }
 
+  // **A style is only the pieces it replaces, and the rest of the tank has to
+  // come from underneath.**
+  //
+  // The client ships a style as the parts it restyles and nothing else, which
+  // is the whole point of one: the Monkey King is a 121B's running gear under a
+  // new hull, so its folder holds a hull, a turret and a gun and no chassis at
+  // all. Published as it arrives, the tank is drawn floating with no road
+  // wheels, and nothing turns: the wheels are declared by the chassis. Measured
+  // across the six styles the tier X pass produced, every one of them was
+  // missing something, and one was missing its turret and its gun.
+  //
+  // **The inherited pieces point at the parent's files rather than copying
+  // them.** A `glb` is resolved against the vehicle's own folder, so a style
+  // reaches one folder up, and the textures never move at all since a material
+  // names them from the root of the mirror. What has to be rewritten is the
+  // material INDEX, which is a position in this manifest's own list.
+  for (const key of [...vehicles.keys()]) {
+    const dressed = key.indexOf(`/${SKIN_FOLDER}/`);
+    if (dressed < 0) continue;
+    const at = path.join(settings.out, "vehicles", key, "model.json");
+    // **The folder a style sits in is not always a vehicle.** A style is
+    // published under the content path its vehicle names, and a vehicle that
+    // borrows another's meshes has one of those with nothing in it: the CS-63
+    // OSP3 has `poland/Pl21_CS_63_OSP3/_skins/…` and no geometry of its own, so
+    // the tank underneath is the one the index sends that code to.
+    const folder = key.slice(0, dressed);
+    const drawn = index[folder.slice(folder.indexOf("/") + 1)];
+    const parentKey = fs.existsSync(path.join(settings.out, "vehicles", folder, "model.json"))
+      ? folder
+      : (drawn ?? folder);
+    const parentAt = path.join(settings.out, "vehicles", parentKey, "model.json");
+    if (!fs.existsSync(at) || !fs.existsSync(parentAt)) continue;
+    // How far up and back across the inherited files are, which is two levels
+    // for a style sitting in its own vehicle's folder and further for one whose
+    // vehicle borrows: `../../../Pl21_CS_63`.
+    const upward = path.posix.relative(`vehicles/${key}`, `vehicles/${parentKey}`);
+    const model = JSON.parse(fs.readFileSync(at, "utf8")) as VehicleModel;
+    const parent = JSON.parse(fs.readFileSync(parentAt, "utf8")) as VehicleModel;
+    // **By family, not by name.** A vehicle carries several guns and several
+    // turrets, and a style ships the one it restyles: the Vz. 55 Gothic Warrior
+    // publishes `Gun_02` and nothing else, so inheriting the parent's `Gun_01`
+    // by name puts an unstyled barrel back on the tank and the configurator
+    // mounts it, which is what a reader sees first. A style that dresses a
+    // family at all has dressed all of it, and only a family it is silent about
+    // comes from underneath.
+    const family = (piece: string) => piece.split("_")[0];
+    const dressedFamilies = new Set(Object.keys(model.pieces).map(family));
+    const missing = Object.keys(parent.pieces).filter(
+      (piece) => !model.pieces[piece] && !dressedFamilies.has(family(piece)),
+    );
+    // **Not only the pieces.** A style inherits whatever it has no answer of its
+    // own for, and a style that replaces every piece still has no marks and no
+    // wheels: leaving early on a complete set of models is what left the Erlang
+    // Shen, which replaces the whole tank, with no mark to put on its gun.
+    if (missing.length > 0) {
+      graft(model, parent, missing, upward);
+      compact(model);
+    }
+    // What the inherited running gear needs to be more than scenery: the wheels
+    // it turns on, the arms a kneeling suspension swings, and which of them ride
+    // the ground. The builder writes the last two only where a vehicle has them,
+    // so they are carried across by name rather than by field. A style that
+    // ships its own chassis declares its own, and none of this overwrites.
+    // **The marks of excellence go with the gun, whoever painted it.**
+    //
+    // They are read from the vehicle's identity, which a style has none of: it
+    // is a set of models, not a vehicle, so nothing looked them up for it and a
+    // tank wearing a locked livery came out with no marks to put on at all.
+    // What the game does is the opposite, a style either brings its own three
+    // or leaves the nation's, and never removes them.
+    if (!model.marks?.length && parent.marks?.length) model.marks = parent.marks;
+    const running = ["wheels", "levers", "carried"] as const;
+    const held = model as unknown as Record<string, unknown[]>;
+    const under = parent as unknown as Record<string, unknown[]>;
+    for (const field of running) {
+      if (!held[field]?.length && under[field]?.length) held[field] = under[field];
+    }
+    if (!model.camouflageDensity && parent.camouflageDensity) {
+      model.camouflageDensity = parent.camouflageDensity;
+    }
+    fs.writeFileSync(at, JSON.stringify(model));
+    if (missing.length > 0) {
+      log(`  ${key} took ${missing.join(", ")} from the tank underneath`);
+    }
+  }
+
   // What each 3D style is called, so a wardrobe offers names and not folders.
   if (fs.existsSync(customization)) {
     const skins = readSkinNames(customization, names);
@@ -381,7 +595,7 @@ export async function publish(
     // mirror does not carry, and a viewer would ask for it and come back with
     // nothing at all rather than with the plain tank.
     const worn: Record<string, string> = {};
-    for (const { code, models } of readLockedStyles(customization)) {
+    for (const { code, models } of locked) {
       const at = index[code];
       if (!models || !at) continue;
       if (!fs.existsSync(path.join(settings.out, "vehicles", at, SKIN_FOLDER, models, "model.json"))) continue;

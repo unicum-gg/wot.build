@@ -152,7 +152,14 @@ async function main(): Promise<void> {
   // above is about the client changing, this is about the client changing in
   // places, and a run that wants everything redone has to pass both.
   const asked = demand(settings);
-  const held: Fingerprints = settings.force ? {} : readFingerprints(settings.out, asked);
+  // **Read whatever the run is about to do with them.** `--force` decides as if
+  // nothing had ever been mirrored, but it must not FORGET what was: a run
+  // narrowed to one tier records only that tier, so dropping the rest here
+  // would leave `packages.json` describing the last slice alone and every other
+  // one would be swept again on the next build. Which is exactly the shape the
+  // optional styles have to be filled in, one tier at a time.
+  const recorded: Fingerprints = readFingerprints(settings.out, asked);
+  const held: Fingerprints = settings.force ? {} : recorded;
   const seen: Fingerprints = {};
   try {
     // **The scripts come first, before any geometry.** They used to be read at
@@ -238,7 +245,7 @@ async function main(): Promise<void> {
     // what the mirror holds, so recording them before the files are on disk
     // would let a run that died half way tell the next one there was nothing
     // left to do.
-    writeFingerprints(settings.out, asked, { ...held, ...seen });
+    writeFingerprints(settings.out, asked, { ...recorded, ...seen });
     writeMeasured(settings.out, patterns);
     log(`done: ${written} vehicles, ${converted.size} textures, ${(bytes / 1e6).toFixed(1)} MB of metadata`);
     // A vehicle carrying a link but no path means its `.track` was not read,
