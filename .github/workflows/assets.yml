@@ -11,6 +11,15 @@ on:
   schedule:
     - cron: "30 5 * * *" # daily, just after the sources build
   workflow_dispatch:
+    inputs:
+      force:
+        description: >-
+          Re-extract even when the branch already carries this client's build.
+          What a run publishes depends on the extraction rules as well as on the
+          client, so widening them (a directory that was being skipped) reaches
+          nothing until one run ignores the version stamp.
+        type: boolean
+        default: false
 
 concurrency:
   group: assets
@@ -67,7 +76,10 @@ jobs:
             "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
 
       - name: Generate (no-op if the client version is unchanged)
-        run: npm run assets -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out
+        run: |
+          npm run assets -- \
+            --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out \
+            ${{ inputs.force && '--force' || '' }}
 
       - name: Commit & push if changed
         working-directory: out
