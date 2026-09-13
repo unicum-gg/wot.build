@@ -41,9 +41,17 @@ different.
   minimap markers cut out of the client's battle atlas
 - `generate-models.ts`: a vehicle's **armor**, read out of the Havok collision
   files as named plates, and its **visual model**, converted from BigWorld
-  geometry to glTF with its textures as WebP, plus two files at the root: the
-  2D style catalogue, published once rather than beside every vehicle, and the
-  index saying which vehicles exist and under which nation folder
+  geometry to glTF with its textures as WebP, plus three files at the root: the
+  2D style catalogue, published once rather than beside every vehicle, the index
+  saying which vehicles exist and under which nation folder, and `worn.json`,
+  naming the 3D style a vehicle is issued already wearing
+
+  That last one is what makes a reward vehicle look like itself. Most of them
+  ship no geometry at all: the Monkey King is a 121B plus a style the game will
+  not let its owner take off, so the index points it at the 121B and without the
+  style it is drawn as one. Those model sets are pulled by default, and only
+  those, since 237 vehicles declare 330 between them and the rest are
+  alternatives a player chooses. `--skins` pulls the lot.
 
 The sources mirror does the opposite of the assets one and **empties its
 worktree first**: a script the client dropped must stop being published, because
@@ -54,6 +62,26 @@ vehicle's pieces are split across its tier's `-partN` packages, and the textures
 a nation shares between its vehicles live in the `shared_content` ones instead.
 It converts each package as it sweeps it and keeps only the output, because
 holding them all at once would mean twenty gigabytes on disk.
+
+**It also only redoes what moved.** Wargaming publishes no patch to read: asked
+for a part's chain, WGUS answers with one link, the whole install, 15.84 GB for
+the release branch's `sdcontent`. So a new build says nothing about what changed
+inside it. The archive does, in the header the sweep already downloads to
+enumerate its blocks: every package carries a checksum, and those are published
+as `packages.json` beside the mirror. A run compares them and leaves an unchanged
+package entirely alone, which means not downloaded, not extracted and not
+converted. What that turns into is a run measured in the packages a patch really
+touched rather than in the whole client, and it is why the root files
+(`vehicles.json`, `based-on.json`, `styles2d.json`) are written from the state of
+the mirror rather than from what the run happened to rebuild: written from the
+run, an index naming three vehicles would tell a reader the other 1400 do not
+exist. `patterns.json` is kept for the same reason, since a pattern's pixel size
+is measured as it is converted and a style resolved without it is published at
+the wrong scale.
+
+`--force` ignores both guards, the version and the checksums, and is what to
+pass right after changing the generator itself: the output would differ where
+neither the version nor any package has.
 
 ## Running one locally
 

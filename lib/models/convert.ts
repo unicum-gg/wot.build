@@ -35,6 +35,37 @@ import { trackSegment } from "../model.js";
  */
 export type Measured = Map<string, { size: [number, number]; weights: 3 | 4 }>;
 
+/** Where a run leaves its measurements for the next one. */
+const MEASURED_FILE = "patterns.json";
+
+/**
+ * What earlier runs measured, so an incremental one is not left guessing.
+ *
+ * **A run that skips a package measures nothing from it**, and the styles it
+ * does resolve name patterns that live in exactly those packages: published
+ * from an empty table, they would go out with no size and four weights, which
+ * is the failure the note above describes, silently and on a mirror that was
+ * already right. A measurement is a property of the client's file rather than
+ * of the run that read it, so it is kept beside the mirror like the checksums.
+ */
+export function readMeasured(out: string): Measured {
+  try {
+    const held = JSON.parse(
+      fs.readFileSync(path.join(out, MEASURED_FILE), "utf8"),
+    ) as Record<string, { size: [number, number]; weights: 3 | 4 }>;
+    return new Map(Object.entries(held));
+  } catch {
+    return new Map();
+  }
+}
+
+/** Record what this run measured, on top of what was already known. */
+export function writeMeasured(out: string, measured: Measured): void {
+  fs.mkdirSync(out, { recursive: true });
+  const sorted = Object.fromEntries([...measured.entries()].sort(([a], [b]) => a.localeCompare(b)));
+  fs.writeFileSync(path.join(out, MEASURED_FILE), `${JSON.stringify(sorted)}\n`);
+}
+
 // Shipped beside a vehicle's own textures but never drawn: a baked shadow the
 // garage puts under the tank.
 const NON_TEXTURE = /HangarShadowMap/i;

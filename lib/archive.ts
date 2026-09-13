@@ -8,7 +8,23 @@ import path from "node:path";
 import { fetchRange } from "./http.js";
 import type { Volume } from "./wgus.js";
 
-export type Block = { name: string; offset: number; packed: number };
+export type Block = {
+  name: string;
+  offset: number;
+  packed: number;
+  /**
+   * The entry's own checksum, as the archive records it.
+   *
+   * **It is what makes a run incremental, and it costs nothing.** Wargaming
+   * republishes the whole install on every build rather than a patch over the
+   * last one, so the only way to know what actually moved is to compare the
+   * archive against the one the mirror was built from. This is read out of the
+   * header we already download to enumerate the blocks, so asking the question
+   * is two megabytes and a `7z l`, against the fifteen gigabytes of answering
+   * it by converting everything again.
+   */
+  crc: string;
+};
 
 const HEADER_HEAD = 64 * 1024; // packed-header stream at the front
 const HEADER_TAIL = 2 * 1024 * 1024; // end signature + encoded header
@@ -100,7 +116,11 @@ export class SparseArchive {
       const name = (entry.match(/^Path = (.+)$/m) ?? [])[1];
       if (!name || !/^Packed Size =/m.test(entry)) continue; // header or directory
       const packed = Number((entry.match(/^Packed Size = (\d+)$/m) ?? [])[1] ?? "0");
-      blocks.set(name, { name, offset, packed });
+      // Empty on the handful of entries 7z lists without one (a directory, a
+      // zero-length file). An empty checksum never matches a recorded one, so
+      // such an entry is simply always swept, which is the safe way round.
+      const crc = (entry.match(/^CRC = ([0-9A-F]+)$/m) ?? [])[1] ?? "";
+      blocks.set(name, { name, offset, packed, crc });
       offset += packed;
     }
     return blocks;

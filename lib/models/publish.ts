@@ -11,10 +11,11 @@ import { readMarks } from "../insignia.js";
 import { nameFor, readCatalogue } from "../localization.js";
 import { readVehicleIdentity } from "../identity.js";
 import type { VehicleScripts } from "../script.js";
+import { readLockedStyles } from "../locked-styles.js";
 import { readSkinNames, type Style2D } from "../style.js";
 import { wearableStyles } from "./wearable.js";
 import { patternWeights } from "../texture.js";
-import { indexPaths, texturePath } from "../material.js";
+import { indexPaths, TEXTURE_EXTENSION, texturePath } from "../material.js";
 import type { VehicleModel } from "../model.js";
 import { fold } from "./catalogue.js";
 import { SKIN_FOLDER, type Catalogue } from "./sweep.js";
@@ -25,6 +26,28 @@ import { log, type Settings } from "./settings.js";
 /** The client's grey stand-in for a vehicle it no longer ships. */
 const PLACEHOLDER = /_Placeholder$/;
 
+/**
+ * Every texture the mirror already carries, by the path a material names it at.
+ *
+ * Walked rather than remembered: the mirror is a git checkout of a branch, so
+ * what is on disk is the whole truth about what a previous run published, and
+ * nothing has to be kept in step with it.
+ */
+function mirrored(out: string): string[] {
+  const root = path.join(out, "vehicles");
+  if (!fs.existsSync(root)) return [];
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(TEXTURE_EXTENSION)) found.push(path.relative(out, full));
+    }
+  };
+  walk(root);
+  return found;
+}
+
 export async function publish(
   work: string,
   converted: Set<string>,
@@ -33,7 +56,17 @@ export async function publish(
   patterns: Measured,
   settings: Settings,
 ): Promise<{ vehicles: number; bytes: number }> {
-  const published = indexPaths([...converted].map(texturePath));
+  // **What a material may name: what this run converted, plus what the mirror
+  // already holds.** A run that skipped an unchanged package converted none of
+  // its textures, and a vehicle rebuilt beside it still names them: resolved
+  // against this run alone, every one of those references would be dropped and
+  // the vehicle published with no paint on it. The published path of a texture
+  // is its client path with another extension, which is also where it sits
+  // under `out`, so the tree answers the question directly.
+  const published = indexPaths([
+    ...[...converted].map(texturePath),
+    ...mirrored(settings.out),
+  ]);
   const vehicleScripts = path.join(work, "scripts", "item_defs", "vehicles");
   const customization = path.join(work, "scripts", "item_defs", "customization");
   // A style names itself with a key. Without the catalogue a viewer offers
@@ -213,6 +246,27 @@ export async function publish(
     }
     written++;
   }
+  // **The index describes the mirror, not the run.**
+  //
+  // A run that skipped every unchanged package built a handful of vehicles, and
+  // the index is the list of what a consumer may ask for: written from the run
+  // alone it would say the mirror holds a handful, and every other vehicle on
+  // the site would fall back to a photograph with its meshes sitting right
+  // there. So it is completed from the client's own account of who draws what,
+  // kept to the folders the mirror actually has on disk.
+  //
+  // That is also what retires a vehicle the game has dropped: the scripts no
+  // longer mention it, so nothing indexes it, even though its files are still
+  // in the branch.
+  for (const [key, codes] of scripts.drawnBy) {
+    if (key.includes(`/${SKIN_FOLDER}/`)) continue;
+    const code = key.slice(key.indexOf("/") + 1);
+    if (PLACEHOLDER.test(code)) continue;
+    if (!fs.existsSync(path.join(settings.out, "vehicles", key, "model.json"))) continue;
+    for (const drawing of codes) index[drawing] = key;
+    index[code] = key;
+  }
+
   // **Where each vehicle is, and therefore which ones exist at all.**
   //
   // A consumer knows a vehicle by the code the game gives it, `R45_IS-7`, and
@@ -254,13 +308,14 @@ export async function publish(
       const drawn = at.slice(at.indexOf("/") + 1);
       if (drawn !== code) from[code] = drawn;
     }
-    for (const [key, entry] of vehicles) {
-      const script = scripts.scripts.get(key);
+    // Walked over every script rather than over this run's vehicles, for the
+    // same reason the index is: a vehicle nobody rebuilt today is still one the
+    // mirror carries, and its donor is still worth saying on its page.
+    for (const [key, script] of scripts.scripts) {
       const code = key.slice(key.indexOf("/") + 1);
-      if (!script || from[code] || code.includes("/")) continue;
+      if (from[code] || code.includes("/")) continue;
       const donor = Object.values(script.shells).find((at) => at !== key);
       if (donor) from[code] = donor.slice(donor.indexOf("/") + 1);
-      void entry;
     }
     const based = `${JSON.stringify(Object.fromEntries(Object.entries(from).sort()))}\n`;
     fs.writeFileSync(path.join(settings.out, "based-on.json"), based);
@@ -311,14 +366,62 @@ export async function publish(
       bytes += Buffer.byteLength(json);
       log(`${Object.keys(skins).length} named 3D styles`);
     }
+
+    // **What a vehicle is issued already wearing**, which for most of them is
+    // the only thing that makes them look like themselves.
+    //
+    // By vehicle code and not in the manifest, for the same reason `based-on`
+    // is a file of its own: a manifest belongs to a FOLDER of geometry and
+    // several vehicles read one. The Monkey King and the plain 121B share
+    // `chinese/Ch25_121_mod_1971B`, so a field written there would put the
+    // Monkey King's livery on the 121B as well.
+    //
+    // Only where the set was actually published. A run narrowed to one vehicle,
+    // or one that could not reach a package, would otherwise name a folder the
+    // mirror does not carry, and a viewer would ask for it and come back with
+    // nothing at all rather than with the plain tank.
+    const worn: Record<string, string> = {};
+    for (const { code, models } of readLockedStyles(customization)) {
+      const at = index[code];
+      if (!models || !at) continue;
+      if (!fs.existsSync(path.join(settings.out, "vehicles", at, SKIN_FOLDER, models, "model.json"))) continue;
+      worn[code] = models;
+    }
+    if (Object.keys(worn).length > 0) {
+      const json = `${JSON.stringify(Object.fromEntries(Object.entries(worn).sort()))}\n`;
+      fs.writeFileSync(path.join(settings.out, "worn.json"), json);
+      bytes += Buffer.byteLength(json);
+      log(`${Object.keys(worn).length} vehicles issued wearing a style`);
+    }
   }
 
   // Written last, since a vehicle can only be folded in once it is resolved.
+  //
+  // **Merged into what the mirror holds rather than replacing it.** The recipes
+  // are the same on every vehicle that can wear them, which is the whole reason
+  // they are published once at the root, so a run that rebuilt three vehicles
+  // resolved three vehicles' worth of them and the rest are exactly as they
+  // were. Written over, that run would leave every other vehicle's patch
+  // pointing at styles the catalogue no longer describes.
   if (catalogue.size > 0) {
-    const json = `${JSON.stringify([...catalogue.values()])}\n`;
-    fs.writeFileSync(path.join(settings.out, "styles2d.json"), json);
+    const at = path.join(settings.out, "styles2d.json");
+    const held = new Map<number, Style2D>();
+    try {
+      for (const style of JSON.parse(fs.readFileSync(at, "utf8")) as Style2D[]) {
+        held.set(style.id, style);
+      }
+    } catch {
+      // No catalogue yet, or one this version cannot read: this run writes it.
+    }
+    for (const [id, style] of catalogue) held.set(id, style);
+    const json = `${JSON.stringify([...held.values()].sort((a, b) => a.id - b.id))}\n`;
+    fs.writeFileSync(at, json);
     bytes += Buffer.byteLength(json);
-    log(`${catalogue.size} styles in the shared catalogue`);
+    log(
+      held.size === catalogue.size
+        ? `${held.size} styles in the shared catalogue`
+        : `${held.size} styles in the shared catalogue, ${catalogue.size} of them resolved by this run`,
+    );
   }
   return { vehicles: written, bytes };
 }

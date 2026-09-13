@@ -36,10 +36,14 @@ import {
   convertPieces,
   convertTextures,
   convertTrack,
+  readMeasured,
+  writeMeasured,
   type Measured,
 } from "./lib/models/convert.js";
 import { publish } from "./lib/models/publish.js";
-import { log, readSettings } from "./lib/models/settings.js";
+import { lockedModelSets, readLockedStyles } from "./lib/locked-styles.js";
+import { demand, family, movedFamilies, readFingerprints, writeFingerprints, type Fingerprints } from "./lib/models/fingerprint.js";
+import { log, readSettings, SkinScope } from "./lib/models/settings.js";
 import {
   accumulate,
   packages,
@@ -54,8 +58,13 @@ import {
 
 const settings = readSettings(process.argv.slice(2));
 const vehicles: Catalogue = new Map();
-/** What each camouflage pattern measured, taken as it was converted. */
-const patterns: Measured = new Map();
+/**
+ * What each camouflage pattern measured, taken as it was converted.
+ *
+ * Seeded from the mirror, since a run that skips an unchanged package measures
+ * none of its patterns and the styles it resolves still name them.
+ */
+const patterns: Measured = readMeasured(settings.out);
 
 /** Whether a swept code is the vehicle asked for, or one of its 3D styles. */
 const isOrDresses = (code: string, only: string) =>
@@ -137,6 +146,14 @@ async function main(): Promise<void> {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "wotmodels-work-"));
   const converted = new Set<string>();
   const opened: SparseArchive[] = [];
+  // **What the mirror was last built from**, so a build that moved three
+  // packages costs three packages. Empty under `--force`, which is what makes
+  // that flag mean "as if nothing had ever been mirrored": the version guard
+  // above is about the client changing, this is about the client changing in
+  // places, and a run that wants everything redone has to pass both.
+  const asked = demand(settings);
+  const held: Fingerprints = settings.force ? {} : readFingerprints(settings.out, asked);
+  const seen: Fingerprints = {};
   try {
     // **The scripts come first, before any geometry.** They used to be read at
     // the end, which was enough while everything they answered was about the
@@ -147,6 +164,19 @@ async function main(): Promise<void> {
     // nothing next to the tiers it now precedes.
     await sweepScripts(client, opened, work);
     const scripts = readVehicleScripts(path.join(work, "scripts", "item_defs", "vehicles"));
+    // **Which 3D styles this run has to carry, decided from the client rather
+    // than from a list.** A style bolted onto a vehicle is that vehicle's only
+    // appearance, so its models are as much a part of the mirror as any hull.
+    // Read here because it needs the customization tree the scripts package
+    // just put on disk, and needed here because every sweep after this one is
+    // where those files would be taken from.
+    const locked = readLockedStyles(path.join(work, "scripts", "item_defs", "customization"));
+    const skins = settings.skins === SkinScope.All ? new Set<string>() : lockedModelSets(locked);
+    log(
+      settings.skins === SkinScope.All
+        ? `${locked.length} styles locked onto a vehicle, pulling every 3D style`
+        : `${locked.length} styles locked onto a vehicle, ${skins.size} model sets to pull`,
+    );
     for (const part of settings.skipHd ? ["sdcontent", "client"] : ["sdcontent", "hdcontent", "client"]) {
       const chain = client.getChain(part);
       if (chain.length === 0) continue;
@@ -167,14 +197,31 @@ async function main(): Promise<void> {
         // the middle, which costs a little work and no correctness.
         SCRIPT_PACKAGE.test(name) ? 0 : SHARED_PACKAGE.test(name) || HD_SHARED_PACKAGE.test(name) ? 2 : 1;
       const ordered = [...blocks].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b));
+      // Decided for the whole part before any of it is swept, since what a
+      // package's siblings did is part of the answer for that package.
+      const moved = movedFamilies(held, blocks.values());
+      let skipped = 0;
       for (const [name, block] of ordered) {
-        await sweep(archive, block, work, settings);
+        seen[name] = block.crc;
+        // **Unchanged means untouched: not downloaded, not extracted, not
+        // converted.** The mirror already holds what this package produced, and
+        // the run is about to be handed that tree to publish into, so there is
+        // nothing for a sweep to add. The scripts are the exception and are
+        // always read: everything downstream is keyed off them, from which
+        // vehicle draws which geometry to which style is bolted onto what, and
+        // they are 23 MB.
+        if (!SCRIPT_PACKAGE.test(name) && !moved.has(family(name))) {
+          skipped++;
+          continue;
+        }
+        await sweep(archive, block, work, settings, skins);
         await drain(work, converted, scripts);
         log(`  ${path.basename(name)} (${(block.packed / 1e6).toFixed(0)} MB block), ${vehicles.size} vehicles so far`);
         // Blocks stay in the sparse volumes once filled, so walking every
         // package would materialise the whole part on disk.
         await archive.reset();
       }
+      if (skipped > 0) log(`  ${skipped} package(s) unchanged, left alone`);
     }
 
     // Nothing else is coming, so anything still waiting on a file is converted
@@ -187,6 +234,12 @@ async function main(): Promise<void> {
     const { vehicles: written, bytes } = await publish(work, converted, scripts, vehicles, patterns, settings);
     fs.mkdirSync(settings.out, { recursive: true });
     fs.writeFileSync(versionFile, `${client.versionName}\n`);
+    // **Written after the publish, and only then.** These are a claim about
+    // what the mirror holds, so recording them before the files are on disk
+    // would let a run that died half way tell the next one there was nothing
+    // left to do.
+    writeFingerprints(settings.out, asked, { ...held, ...seen });
+    writeMeasured(settings.out, patterns);
     log(`done: ${written} vehicles, ${converted.size} textures, ${(bytes / 1e6).toFixed(1)} MB of metadata`);
     // A vehicle carrying a link but no path means its `.track` was not read,
     // which is invisible in the output: the viewer just falls back to the

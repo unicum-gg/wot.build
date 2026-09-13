@@ -12,6 +12,15 @@ name: models
 # done here instead: a branch that does not exist yet is started empty, and the
 # vehicles are committed and pushed in chunks that stay under the cap. Every run
 # after that pushes only what a patch changed, which is one small chunk.
+#
+# **Three hours is what a full build costs, not what a run costs.** Wargaming
+# republishes the whole install rather than a patch, so the only account of what
+# moved is the checksum each package carries in the archive header. Those are
+# published as `packages.json` beside the mirror, and a run sweeps the families
+# whose checksums moved and leaves the rest alone. A patch that touches two
+# tiers is two tiers of work. The timeout below still has to cover the full
+# build, which is what a seed, a `--force` and the first run after this one all
+# are.
 on:
   schedule:
     - cron: "0 7 * * *" # daily, after sources, assets and maps
@@ -27,9 +36,26 @@ on:
       skins:
         # 237 vehicles declare 330 of them between them, each a full set of
         # pieces with textures of its own, so they roughly double the mirror.
-        description: "Also publish the 3D styles"
+        #
+        # **The ones a vehicle cannot take off are published either way**, and
+        # they are not what this is about: 32 reward vehicles ship no geometry
+        # at all, so without their style they are drawn as the tank they were
+        # made from. This input is for the other 298, which are alternatives a
+        # player picks in the wardrobe.
+        description: "Also publish every optional 3D style, not only the locked ones"
         type: boolean
         default: false
+      packages:
+        # **What makes a job too big for a runner divisible.** Turning the
+        # optional styles on is a few hours of extraction that no checksum can
+        # spread over later runs, since asking for them retires every
+        # fingerprint at once. Narrowed to one tier at a time it is a handful of
+        # ordinary runs, and they compose: each records what it swept, the root
+        # files are written from the state of the mirror rather than from the
+        # run, and the next tier picks up where the last one left off.
+        description: "Only sweep packages whose name contains one of these, comma separated (e.g. vehicles_level_08)"
+        type: string
+        default: ""
 
 concurrency:
   group: models
@@ -127,7 +153,15 @@ jobs:
           esac
 
       - name: Generate (no-op if the client version is unchanged)
-        run: npm run models -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out ${{ inputs.force && '--force' || '' }} ${{ inputs.skins && '--skins' || '' }}
+        # The package filter goes through the environment rather than into the
+        # command line: it is the one input a person types, and an interpolated
+        # string is a shell injection waiting for someone to be clever in it.
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          npm run models -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out \
+            ${{ inputs.force && '--force' || '' }} ${{ inputs.skins && '--skins' || '' }} \
+            ${PACKAGES:+--package "$PACKAGES"}
 
       - name: Commit & push in chunks
         working-directory: out

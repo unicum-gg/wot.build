@@ -7,6 +7,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/** Which of the client's alternative model sets a run pulls out of it. */
+export enum SkinScope {
+  /**
+   * Only the sets a vehicle is issued wearing and cannot take off.
+   *
+   * 38 of them, against 330 for the lot, and they are the ones without which a
+   * vehicle is drawn as a tank it is not: a reward vehicle very often ships no
+   * geometry of its own, so the mirror indexes it onto the tank underneath and
+   * its whole appearance is the style bolted on top.
+   */
+  Locked = "locked",
+  /** Every 3D style the client ships, which is what looking at a wardrobe wants. */
+  All = "all",
+}
+
 export type Settings = {
   host: string;
   guid: string;
@@ -31,7 +46,15 @@ export type Settings = {
   hdTextureSize?: number;
   skipHd: boolean;
   collisionOnly: boolean;
-  withSkins: boolean;
+  /**
+   * Which 3D styles are taken.
+   *
+   * **Not a boolean any more.** Taking none left 32 vehicles drawn as the tank
+   * they were made from, and taking all of them swells the mirror by 330 sets
+   * for a wardrobe that offers them one at a time. The locked ones are the
+   * middle: they are not alternatives, they are the vehicle.
+   */
+  skins: SkinScope;
   force: boolean;
   /**
    * Drop a source once it has been converted.
@@ -68,7 +91,7 @@ export function readSettings(args: string[]): Settings {
     hdTextureSize: hdTextureSize ? Number(hdTextureSize) : undefined,
     skipHd: args.includes("--no-hd"),
     collisionOnly: args.includes("--collision-only"),
-    withSkins: args.includes("--skins"),
+    skins: args.includes("--skins") ? SkinScope.All : SkinScope.Locked,
     force: args.includes("--force"),
     consume: (at: string) => {
       if (!only) fs.rmSync(at);

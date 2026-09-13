@@ -10,7 +10,7 @@ import { CUSTOMIZATION_GLOBS, VEHICLE_SCRIPTS_GLOB } from "../script.js";
 import { TRACK_GLOB } from "../track.js";
 import { VehicleBuilder } from "../vehicle.js";
 import type { CollisionPart } from "../collision.js";
-import type { Settings } from "./settings.js";
+import { SkinScope, type Settings } from "./settings.js";
 
 export type Vehicle = { nation: string; code: string };
 export type Accumulated = {
@@ -66,16 +66,31 @@ const VISUAL_GLOBS = ["vehicles/*/*/normal/lod0/*", "vehicles/*/*/*.dds", TRACK_
 const SHARED_GLOBS = ["vehicles/*/*/*.dds"];
 
 // A vehicle's alternative skins, one folder deeper, each a full set of pieces
-// with textures of its own. Left out by default: 237 vehicles declare 330 of
-// them between them and taking the lot would swell the mirror for a feature
-// nothing reads yet. `--skins` pulls them, which is what looking at one
-// vehicle's styles needs.
+// with textures of its own. 237 vehicles declare 330 of them between them, so
+// taking the lot swells the mirror for a wardrobe that offers them one at a
+// time, which is what `--skins` is for.
+//
+// **What is taken by default is the handful a vehicle cannot take off.** Those
+// are not alternatives: 32 of the 40 vehicles wearing one ship no geometry of
+// their own, so the mirror indexes them onto the tank underneath and, without
+// the set, every one of them is drawn as that tank instead of as itself.
 /** The folder a vehicle keeps its 3D styles in, one set of pieces per name. */
 export const SKIN_FOLDER = "_skins";
-const SKIN_GLOBS = [
-  `vehicles/*/*/${SKIN_FOLDER}/*/normal/lod0/*`,
-  `vehicles/*/*/${SKIN_FOLDER}/*/*.dds`,
-];
+
+/**
+ * What to take out of the `_skins` tree, given which sets are wanted.
+ *
+ * Named one by one rather than filtered afterwards, because the filtering that
+ * matters happens inside 7z: what is not matched is never written, and the
+ * scratch tree is the thing a run is bounded by.
+ */
+function skinGlobs(settings: Settings, wanted: ReadonlySet<string>): string[] {
+  const sets = settings.skins === SkinScope.All ? ["*"] : [...wanted].sort();
+  return sets.flatMap((set) => [
+    `vehicles/*/*/${SKIN_FOLDER}/${set}/normal/lod0/*`,
+    `vehicles/*/*/${SKIN_FOLDER}/${set}/*.dds`,
+  ]);
+}
 
 // What a 2D style puts on a vehicle that is not paint: the marks of excellence
 // and the stickers and lettering. These live under `gui/` rather than under a
@@ -113,6 +128,14 @@ export async function sweep(
   block: Block,
   work: string,
   settings: Settings,
+  /**
+   * The model sets to take, when the run is not taking every one of them.
+   *
+   * Handed in rather than read here because it comes out of the client itself:
+   * the customization tree names them, and that tree is only on disk once the
+   * scripts package has been swept, which is the sweep before all the others.
+   */
+  skins: ReadonlySet<string> = new Set(),
 ): Promise<void> {
   const pkgDir = path.join(archive.dir, "pkg");
   fs.rmSync(pkgDir, { recursive: true, force: true });
@@ -131,7 +154,7 @@ export async function sweep(
         ...PREFAB_GLOBS,
         ...CUSTOMIZATION_GLOBS,
         ...DECAL_GLOBS,
-        ...(settings.withSkins ? SKIN_GLOBS : []),
+        ...skinGlobs(settings, skins),
       ];
   execFileSync("7z", ["x", pkg, ...globs.map((g) => `-i!${g}`), `-o${work}`, "-y"], { stdio: "ignore" });
   fs.rmSync(pkgDir, { recursive: true, force: true });
