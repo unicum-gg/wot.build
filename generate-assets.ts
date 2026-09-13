@@ -69,6 +69,22 @@ const SKIPPED = /(^|\/)audioww/i;
 // last synced, which is worse than the fork we are replacing.
 const PUBLISHED = "gui";
 
+// GitHub refuses a file over 100 MiB at the pre-receive hook, and it refuses
+// the whole push rather than the file: one oversized blob and nothing the run
+// produced gets published. So the size is checked here rather than discovered
+// by a rejected push an hour later.
+//
+// The cap is the platform's and nothing else. Videos belong in this mirror, the
+// branch already carries several (`v_day_outro.usm` sits at 99.95 MiB, just
+// under), so this must not become "skip the videos": it is the four the client
+// ships past the line (`intro`, `d_day`, `scc_intro`, `scc_outro`, 104 to
+// 185 MB) that cannot be hosted, and only those. They surfaced with the mode
+// packages, which nothing was extracting before.
+//
+// Skipped files are logged, never dropped quietly: a mirror that silently omits
+// something reads as a mirror that is complete.
+const MAX_PUBLISHED_BYTES = 100 * 1024 * 1024;
+
 // **A game mode's own art is one directory deeper, and taking only the root
 // left every mode frozen at whatever upstream last synced.** The base packages
 // hold `gui/...` at their root, but each mode ships its own package whose root
@@ -177,6 +193,8 @@ async function main(): Promise<void> {
     // published, and only for this run: the tree on disk is whatever the last
     // run left, which is the point of a mirror that accumulates.
     const written = new Map<string, Precedence>();
+    // What the platform's size limit cost this run, reported at the end.
+    const oversized: string[] = [];
     for (const part of PARTS) {
       const chain = client.getChain(part);
       if (chain.length === 0) continue;
@@ -225,6 +243,11 @@ async function main(): Promise<void> {
           for (const file of walk(dir)) {
             const rel = path.relative(from, file).split(path.sep).join("/");
             if ((written.get(rel) ?? Precedence.Mode) > precedence) continue;
+            const bytes = fs.statSync(file).size;
+            if (bytes > MAX_PUBLISHED_BYTES) {
+              oversized.push(`${rel} (${(bytes / 1e6).toFixed(0)} MB)`);
+              continue;
+            }
             writeFile(path.join(OUT, rel), fs.readFileSync(file));
             written.set(rel, precedence);
             kept++;
@@ -242,6 +265,10 @@ async function main(): Promise<void> {
     }
 
     writeFile(versionFile, `${client.versionName}\n`);
+    if (oversized.length > 0) {
+      log(`skipped ${oversized.length} files over GitHub's 100 MiB limit:`);
+      for (const file of oversized) log(`  ! ${file}`);
+    }
     log(`done: ${total} files in ${OUT}`);
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
