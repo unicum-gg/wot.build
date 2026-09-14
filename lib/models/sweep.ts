@@ -16,6 +16,17 @@ export type Vehicle = { nation: string; code: string };
 export type Accumulated = {
   collision: Record<string, CollisionPart>;
   model: VehicleBuilder;
+  /**
+   * Vehicles this one's track descriptors point at for their geometry, as
+   * `nation/code`.
+   *
+   * A link is shared far more often than a tier is: the E 75 lays the Tiger
+   * II's, the T78 the M41's, the G.W. E 100 the Jagdpanzer E 100's. Where the
+   * donor sits in another package family this run may not hold its mesh at all,
+   * so the reference is carried through to the publish, which reads the mirror
+   * rather than the scratch tree and finds it there.
+   */
+  borrowed: Set<string>;
 };
 /** Every vehicle a run has read so far, keyed `nation/code`. */
 export type Catalogue = Map<string, Accumulated>;
@@ -24,7 +35,7 @@ export function accumulate(catalogue: Catalogue, vehicle: Vehicle): Accumulated 
   const key = `${vehicle.nation}/${vehicle.code}`;
   let entry = catalogue.get(key);
   if (!entry) {
-    entry = { collision: {}, model: new VehicleBuilder() };
+    entry = { collision: {}, model: new VehicleBuilder(), borrowed: new Set() };
     catalogue.set(key, entry);
   }
   return entry;
@@ -156,7 +167,15 @@ export async function sweep(
         ...DECAL_GLOBS,
         ...skinGlobs(settings, skins),
       ];
-  execFileSync("7z", ["x", pkg, ...globs.map((g) => `-i!${g}`), `-o${work}`, "-y"], { stdio: "ignore" });
+  // **`-ssc-` because the client does not spell its own folders consistently.**
+  // 7z matches a pattern case sensitively on every platform but Windows, and the
+  // IS-4 keeps its belt in `Track/` where every other vehicle keeps it in
+  // `track/`: read with the case on, that vehicle simply has no link and
+  // publishes no belt at all. The client is building on Windows, where the two
+  // are the same folder, so the spelling means nothing and matching it exactly
+  // is what invents the difference. The same slip has already cost this mirror
+  // eleven vehicles' albedo textures.
+  execFileSync("7z", ["x", pkg, "-ssc-", ...globs.map((g) => `-i!${g}`), `-o${work}`, "-y"], { stdio: "ignore" });
   fs.rmSync(pkgDir, { recursive: true, force: true });
 }
 

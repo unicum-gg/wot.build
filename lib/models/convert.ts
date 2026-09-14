@@ -21,6 +21,8 @@ import { SKIN_FOLDER, type Accumulated, type Vehicle } from "./sweep.js";
 import { readPrefabs } from "../sequence.js";
 import type { VehicleScripts } from "../script.js";
 import { trackSegment } from "../model.js";
+import { decodePacked } from "../packed.js";
+import { child, text } from "../read.js";
 
 /**
  * What a camouflage pattern measured, taken as it is converted.
@@ -166,38 +168,114 @@ export function convertPieces(
   }
 }
 
+/** The folder a vehicle keeps its belt in, however the client spelled it. */
+function trackFolder(work: string, vehicle: Vehicle): string | null {
+  const at = path.join(work, "vehicles", vehicle.nation, vehicle.code);
+  if (!fs.existsSync(at)) return null;
+  const named = fs.readdirSync(at).find((entry) => entry.toLowerCase() === "track");
+  return named ? path.join(at, named) : null;
+}
+
+/**
+ * Where a link's geometry really is, which is not always beside its descriptor.
+ *
+ * A `.model` is a descriptor and the mesh it names is its `nodelessVisual`. Most
+ * of the time that names the file next to it, and reading the folder was as good
+ * as reading the descriptor. Sometimes it names another vehicle's: the G.W. E
+ * 100 lays the Jagdpanzer E 100's link and the Object 907A the Object 907's, and
+ * their own `track/` folders hold two 199-byte descriptors and no geometry at
+ * all. Read as a folder those vehicles have no link, so they publish no belt,
+ * and the viewer falls back to the flat ribbon the chassis carries: the wheels
+ * turn and the track stands still.
+ *
+ * Resolved against the scratch tree, so it finds the donor only where this run
+ * swept it. That is the common case, since a link is shared between vehicles of
+ * the same tier and a tier is one package family.
+ */
+function linkVisual(
+  work: string,
+  dir: string,
+  name: string,
+): { at: string } | { borrow: string } | null {
+  const own = path.join(dir, `${name}.visual_processed`);
+  if (fs.existsSync(own)) return { at: own };
+  const descriptor = path.join(dir, `${name}.model`);
+  if (!fs.existsSync(descriptor)) return null;
+  let named: string | null = null;
+  try {
+    named = text(child(decodePacked(fs.readFileSync(descriptor)), "nodelessVisual")) || null;
+  } catch {
+    return null;
+  }
+  if (!named) return null;
+  const at = path.join(work, `${named}.visual_processed`);
+  if (fs.existsSync(at)) return { at };
+  // Not in this run's scratch tree, which is the common case: a link is shared
+  // between vehicles of different tiers and a tier is a package family of its
+  // own. Named so the publish can take it from the mirror instead.
+  const donor = /^vehicles\/([^/]+\/[^/]+)\//i.exec(named)?.[1];
+  return donor ? { borrow: donor } : null;
+}
+
 /**
  * Convert a vehicle's track: the path its belt follows and the link laid along
  * it. Both halves are needed, so neither is published without the other.
+ *
+ * **Driven by the descriptors rather than by whatever geometry is in the
+ * folder**, which is how the client reads them and is what lets a vehicle lay a
+ * link that lives under another vehicle's name.
  */
 export function convertTrack(work: string, vehicle: Vehicle, into: Accumulated, settings: Settings): void {
-  const dir = path.join(work, "vehicles", vehicle.nation, vehicle.code, "track");
-  if (!fs.existsSync(dir)) return;
-  for (const file of fs.readdirSync(dir).sort()) {
+  const dir = trackFolder(work, vehicle);
+  if (!dir) return;
+  const files = fs.readdirSync(dir).sort();
+  for (const file of files) {
+    if (!file.endsWith(".track")) continue;
     const full = path.join(dir, file);
-    if (file.endsWith(".track")) {
-      const parsed = readTrackPath(fs.readFileSync(full));
-      if (parsed) into.model.track(path.basename(file, ".track"), parsed.points);
-      settings.consume(full);
+    const parsed = readTrackPath(fs.readFileSync(full));
+    if (parsed) into.model.track(path.basename(file, ".track"), parsed.points);
+    settings.consume(full);
+  }
+  // **A link is whatever the folder names, by descriptor or by mesh.** Reading
+  // only the meshes misses the vehicles whose link lives under another's name;
+  // reading only the descriptors misses the IS-4, whose `Track/` holds a mesh
+  // and no descriptor at all. Both halves of one client, so both are taken.
+  const links = new Set<string>();
+  for (const file of files) {
+    if (file.endsWith(".model")) links.add(path.basename(file, ".model"));
+    else if (file.endsWith(".visual_processed")) links.add(path.basename(file, ".visual_processed"));
+  }
+  for (const name of [...links].sort()) {
+    const found = linkVisual(work, dir, name);
+    if (!found) continue;
+    if ("borrow" in found) {
+      into.borrowed.add(found.borrow);
       continue;
     }
-    if (!file.endsWith(".visual_processed")) continue;
-    const name = path.basename(file, ".visual_processed");
-    const primitives = path.join(dir, `${name}.primitives_processed`);
+    const visual = found.at;
+    const primitives = visual.replace(/\.visual_processed$/, ".primitives_processed");
     if (!fs.existsSync(primitives)) continue;
     try {
-      // **Named after the file it came from, not after the slot.** A belt is
-      // often two runs of two different links, and both live here: written
-      // under one name the second simply overwrote the first, and which of the
-      // pair survived was decided by the order the folder happened to list.
+      // **Named after what this vehicle ships, not after the file the geometry
+      // came out of.** A belt is often two runs of two different links, and
+      // both live here: written under one name the second simply overwrote the
+      // first. The chassis names the descriptor, so that name is also what ties
+      // the published piece back to the belt that lays it, which matters where
+      // the geometry was borrowed and carries another vehicle's name.
       const piece = trackSegment(name);
-      const glb = into.model.add(piece, fs.readFileSync(full), fs.readFileSync(primitives));
+      const glb = into.model.add(piece, fs.readFileSync(visual), fs.readFileSync(primitives));
       if (glb) fs.writeFileSync(path.join(vehicleOut(vehicle, settings), `${piece}.glb`), glb);
     } catch (e) {
       log(`  ! ${vehicle.nation}/${vehicle.code} track link: ${(e as Error).message}`);
     }
-    settings.consume(full);
-    settings.consume(primitives);
+    const descriptor = path.join(dir, `${name}.model`);
+    if (fs.existsSync(descriptor)) settings.consume(descriptor);
+    // Only what this vehicle owns: a borrowed link belongs to the vehicle that
+    // ships it, which still has its own belt to lay with it.
+    if (path.dirname(visual) === dir) {
+      settings.consume(visual);
+      settings.consume(primitives);
+    }
   }
 }
 

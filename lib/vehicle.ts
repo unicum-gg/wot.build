@@ -57,6 +57,18 @@ export class VehicleBuilder {
   /** Client paths of every texture the vehicle needs, deduplicated. */
   readonly textures = new Set<string>();
   private readonly paths: Record<string, number[][]> = {};
+
+  /**
+   * The runs this chassis authored, as they were read.
+   *
+   * Exposed for the one caller that has to lay a belt after the fact: a vehicle
+   * naming another's link publishes no belt of its own, and the pass that lends
+   * it one would otherwise lend it the donor's paths as well.
+   */
+  get authored(): Record<string, number[][]> {
+    return this.paths;
+  }
+
   /** The wheels the chassis turns, gathered as its pieces come in. */
   private readonly wheels: Wheel[] = [];
   /** What the script says about those wheels, which the meshes do not say. */

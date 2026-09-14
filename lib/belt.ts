@@ -16,6 +16,76 @@ import type { ChassisSpline, PhysicalTrack } from "./chassis.js";
 import type { Piece, Tracks } from "./model.js";
 import type { Wheel } from "./wheels.js";
 
+/**
+ * Where a belt hangs, per side, from the paths the chassis authored.
+ *
+ * Lifted out of `beltOf` because it answers on its own, and because a vehicle
+ * that has to borrow its link still lays it along paths of its own: publishing
+ * the donor's instead moved the Churchill St. Gloriana's belt 74 mm back from
+ * the front of its own wheels.
+ */
+export function layPaths({
+  paths,
+  chain,
+  wheels,
+}: {
+  /** The runs the chassis authored, by the file each came from. */
+  paths: Record<string, number[][]>;
+  chain: PhysicalTrack | null;
+  /** The wheels as they came out, which is what a belt is fitted to. */
+  wheels: BeltWheel[];
+}): Record<string, number[][]> {
+  // Most vehicles ship a path per side, but a symmetrical one ships a single
+  // file and expects the other side to be its mirror.
+  const laidOut: Record<string, number[][]> = { ...paths };
+  // A chassis that chains its belt ships no path to lay it along, so the
+  // wheels are the only thing that says where it goes. What a chain pulled
+  // tight around them settles into is the taut band, and the client agrees:
+  // the band round the Strv 103B's eight wheels is 11.18 m, which at the
+  // 132.7 mm link it declares is 84.2 links against the 86 it counts, the
+  // couple of links of slack a real chain carries over its return rollers.
+  if (Object.keys(laidOut).length === 0 && chain) {
+    for (const sign of [1, -1]) {
+      const side = wheels.filter((wheel) => Math.sign(wheel.axle[0]) === sign);
+      if (side.length < 2) continue;
+      // The belt rides on the road wheels, so their plane is its plane.
+      const widest = side.reduce((big, wheel) => (wheel.wrap > big.wrap ? wheel : big));
+      const band = beltAround(
+        side.map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap })),
+        widest.axle[0],
+      );
+      if (band.length >= 3) laidOut[sign > 0 ? "left" : "right"] = band;
+    }
+  }
+  const sides = Object.keys(laidOut);
+  if (sides.length === 1) {
+    const other = sides[0] === "left" ? "right" : "left";
+    laidOut[other] = mirrorPath({ points: laidOut[sides[0]] }).points;
+  }
+  // A belt runs around the wheels on its own side, told apart by which side of
+  // the tank they sit on rather than by their names, which the client keeps
+  // from before the mirror.
+  for (const [side, points] of Object.entries(laidOut)) {
+    if (points.length === 0) continue;
+    const band: BeltWheel[] = wheels
+      .filter((wheel) => Math.sign(wheel.axle[0]) === Math.sign(points[0][0]))
+      .map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap }));
+    laidOut[side] = hugWheels(points, band);
+  }
+
+  // Name each belt for the side it is actually on, which the coordinates say
+  // and the file name only claims. Measured, the two agree: X is the axis the
+  // mirror negates and the client's left-and-right lives on it, so a path it
+  // calls left comes out at positive x beside the wheels it calls `W_L0`.
+  // Taken from the geometry all the same, because the link laid on each side
+  // is chosen by this label and a belt fitted backwards is not a small defect.
+  const sided: Record<string, number[][]> = {};
+  for (const [side, points] of Object.entries(laidOut)) {
+    sided[points[0]?.[0] >= 0 ? "left" : "right"] = points;
+  }
+  return sided;
+}
+
 /** What the manifest says about the belt, or nothing where there is none. */
 export function beltOf({
   pieces,
@@ -81,54 +151,7 @@ export function beltOf({
     clientLeftIsRight ? models?.secondRight : models?.secondLeft,
   );
   const segment = first ? pieces[first] : undefined;
-  // Most vehicles ship a path per side, but a symmetrical one ships a single
-  // file and expects the other side to be its mirror.
-  const laidOut: Record<string, number[][]> = { ...paths };
-  // A chassis that chains its belt ships no path to lay it along, so the
-  // wheels are the only thing that says where it goes. What a chain pulled
-  // tight around them settles into is the taut band, and the client agrees:
-  // the band round the Strv 103B's eight wheels is 11.18 m, which at the
-  // 132.7 mm link it declares is 84.2 links against the 86 it counts, the
-  // couple of links of slack a real chain carries over its return rollers.
-  if (Object.keys(laidOut).length === 0 && chain) {
-    for (const sign of [1, -1]) {
-      const side = wheels.filter((wheel) => Math.sign(wheel.axle[0]) === sign);
-      if (side.length < 2) continue;
-      // The belt rides on the road wheels, so their plane is its plane.
-      const widest = side.reduce((big, wheel) => (wheel.wrap > big.wrap ? wheel : big));
-      const band = beltAround(
-        side.map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap })),
-        widest.axle[0],
-      );
-      if (band.length >= 3) laidOut[sign > 0 ? "left" : "right"] = band;
-    }
-  }
-  const sides = Object.keys(laidOut);
-  if (sides.length === 1) {
-    const other = sides[0] === "left" ? "right" : "left";
-    laidOut[other] = mirrorPath({ points: laidOut[sides[0]] }).points;
-  }
-  // A belt runs around the wheels on its own side, told apart by which side of
-  // the tank they sit on rather than by their names, which the client keeps
-  // from before the mirror.
-  for (const [side, points] of Object.entries(laidOut)) {
-    if (points.length === 0) continue;
-    const band: BeltWheel[] = wheels
-      .filter((wheel) => Math.sign(wheel.axle[0]) === Math.sign(points[0][0]))
-      .map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap }));
-    laidOut[side] = hugWheels(points, band);
-  }
-
-  // Name each belt for the side it is actually on, which the coordinates say
-  // and the file name only claims. Measured, the two agree: X is the axis the
-  // mirror negates and the client's left-and-right lives on it, so a path it
-  // calls left comes out at positive x beside the wheels it calls `W_L0`.
-  // Taken from the geometry all the same, because the link laid on each side
-  // is chosen by this label and a belt fitted backwards is not a small defect.
-  const sided: Record<string, number[][]> = {};
-  for (const [side, points] of Object.entries(laidOut)) {
-    sided[points[0]?.[0] >= 0 ? "left" : "right"] = points;
-  }
+  const sided = layPaths({ paths, chain, wheels });
   return (
     segment && first && Object.keys(sided).length > 0
       ? {

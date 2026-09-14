@@ -17,6 +17,7 @@ import { wearableStyles } from "./wearable.js";
 import { patternWeights } from "../texture.js";
 import { indexPaths, TEXTURE_EXTENSION, texturePath } from "../material.js";
 import type { VehicleModel } from "../model.js";
+import { layPaths } from "../belt.js";
 import { fold } from "./catalogue.js";
 import { SKIN_FOLDER, type Catalogue } from "./sweep.js";
 import type { Measured } from "./convert.js";
@@ -471,18 +472,45 @@ export async function publish(
     if (model.tracks) continue;
     const dressed = key.indexOf(`/${SKIN_FOLDER}/`);
     const script = scripts.scripts.get(key);
-    const named = script?.spline?.left ?? script?.spline?.models.left;
-    const from =
-      dressed >= 0
-        ? key.slice(0, dressed)
-        : /^vehicles\/([^/]+\/[^/]+)\//i.exec(named ?? "")?.[1];
-    if (!from || from === key) continue;
-    const donorAt = path.join(settings.out, "vehicles", from, "model.json");
-    if (!fs.existsSync(donorAt)) continue;
-    const donor = JSON.parse(fs.readFileSync(donorAt, "utf8")) as VehicleModel;
-    if (!donor.tracks || !donor.pieces[donor.tracks.segment]) continue;
-    borrowBelt(settings.out, key, from, model, donor);
-    fs.writeFileSync(at, JSON.stringify(model));
+    // **Every file the chassis points somewhere else, the link model first.**
+    // What a vehicle is missing here is the link, and it can name that in
+    // another vehicle's folder while laying it along two paths of its own: the
+    // Churchill St. Gloriana borrows the plain Churchill VII's link and ships
+    // `track/left.track` and `track/right.track` under its own name. Read from
+    // the path alone the donor came out as itself, the belt was dropped, and
+    // the vehicle was published with wheels that turn under a track that does
+    // not move.
+    const spline = script?.spline;
+    const elsewhere = [spline?.models.left, spline?.models.right, spline?.left, spline?.right]
+      .map((named) => /^vehicles\/([^/]+\/[^/]+)\//i.exec(named ?? "")?.[1])
+      .filter((from): from is string => Boolean(from) && from !== key);
+    // **What the descriptors said first, then what the script says.** A link is
+    // shared between tiers far more often than the scripts admit: the E 75 lays
+    // the Tiger II's and the T78 the M41's, and in both cases the script names
+    // a file in the vehicle's own folder which holds nothing but a pointer. The
+    // conversion reads that pointer and leaves the name here.
+    const named = [...(vehicles.get(key)?.borrowed ?? [])].filter((from) => from !== key);
+    const donors = dressed >= 0 ? [key.slice(0, dressed)] : [...new Set([...named, ...elsewhere])];
+    for (const from of donors) {
+      const donorAt = path.join(settings.out, "vehicles", from, "model.json");
+      if (!fs.existsSync(donorAt)) continue;
+      const donor = JSON.parse(fs.readFileSync(donorAt, "utf8")) as VehicleModel;
+      if (!donor.tracks || !donor.pieces[donor.tracks.segment]) continue;
+      borrowBelt(settings.out, key, from, model, donor);
+      // **The link is what was borrowed, not the belt.** A vehicle that names
+      // another's link still authors its own runs, and they are not the same
+      // runs: the Churchill St. Gloriana's reach 74 mm further forward than the
+      // plain Churchill VII's, so laying the donor's leaves the front of its
+      // own wheels bare. Only where this run read them, which is where the
+      // vehicle was converted rather than inherited from an earlier one.
+      const authored = vehicles.get(key)?.model.authored ?? {};
+      if (Object.keys(authored).length > 0 && (model.wheels?.length ?? 0) > 0) {
+        const laid = layPaths({ paths: authored, chain: null, wheels: model.wheels! });
+        if (Object.keys(laid).length > 0) model.tracks = { ...model.tracks!, paths: laid };
+      }
+      fs.writeFileSync(at, JSON.stringify(model));
+      break;
+    }
   }
 
   // **A style is only the pieces it replaces, and the rest of the tank has to
