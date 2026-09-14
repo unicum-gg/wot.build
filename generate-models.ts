@@ -27,7 +27,7 @@ import path from "node:path";
 import { SparseArchive } from "./lib/archive.js";
 import { readVehicleScripts, type VehicleScripts } from "./lib/script.js";
 import { indexPaths } from "./lib/material.js";
-import { TRACK_SEGMENT } from "./lib/model.js";
+import { TRACK_SEGMENT, type VehicleModel } from "./lib/model.js";
 import { VehicleBuilder } from "./lib/vehicle.js";
 import { resolveClient } from "./lib/wgus.js";
 import {
@@ -238,8 +238,13 @@ async function main(): Promise<void> {
     log(`${codes} vehicles read, drawing from ${scripts.drawnBy.size} sets of geometry`);
     const decals = await convertDecals(work, converted, settings);
     if (decals > 0) log(`${decals} decals, marks and stickers`);
-    const { vehicles: written, bytes } = await publish(work, converted, scripts, vehicles, patterns, settings);
+    // Before the publish and not after it: the publish writes the root files
+    // into this folder, and until now the folder only existed because some
+    // vehicle's own conversion had created it on its way past. A run that
+    // converted nothing at all, which is every run narrowed to a vehicle that
+    // turns out to be in another package, died on ENOENT instead of saying so.
     fs.mkdirSync(settings.out, { recursive: true });
+    const { vehicles: written, bytes } = await publish(work, converted, scripts, vehicles, patterns, settings);
     fs.writeFileSync(versionFile, `${client.versionName}\n`);
     // **Written after the publish, and only then.** These are a claim about
     // what the mirror holds, so recording them before the files are on disk
@@ -251,12 +256,22 @@ async function main(): Promise<void> {
     // A vehicle carrying a link but no path means its `.track` was not read,
     // which is invisible in the output: the viewer just falls back to the
     // ribbon and the track looks passable.
+    //
+    // **Counted off what was published, not off what was built.** A vehicle
+    // that borrows another's link is given it after its model is written, so
+    // read from the builder the Churchill St. Gloriana still had no belt here
+    // and the line said zero about a run that had just laid one. And the piece
+    // is named after the file the link came out of, so the bare `TrackSegment`
+    // this used to look for is a key no vehicle has ever had: the second half
+    // of this line has been reporting zero since it was written.
     let laid = 0;
     let linkOnly = 0;
-    for (const entry of vehicles.values()) {
-      const model = entry.model.build(indexPaths([]), null);
+    for (const key of vehicles.keys()) {
+      const at = path.join(settings.out, "vehicles", key, "model.json");
+      if (!fs.existsSync(at)) continue;
+      const model = JSON.parse(fs.readFileSync(at, "utf8")) as VehicleModel;
       if (model.tracks) laid++;
-      else if (model.pieces[TRACK_SEGMENT]) linkOnly++;
+      else if (Object.keys(model.pieces).some((piece) => piece.startsWith(`${TRACK_SEGMENT}_`))) linkOnly++;
     }
     log(`${laid} vehicles have a real track, ${linkOnly} have a link but no path`);
   } finally {
