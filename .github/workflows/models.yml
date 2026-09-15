@@ -56,6 +56,15 @@ on:
         description: "Only sweep packages whose name contains one of these, comma separated (e.g. vehicles_level_08)"
         type: string
         default: ""
+      branches:
+        # **Which clients to rebuild, because four of them is usually three too
+        # many.** The optional 3D styles are taken a tier at a time, and every
+        # one of those runs would otherwise redo the test client and the two
+        # Lesta ones for a mirror nobody asked about. Empty means all four,
+        # which is what the daily schedule wants.
+        description: "Only these mirror branches, comma separated (WG, WG_CT, Lesta, Lesta_PT)"
+        type: string
+        default: ""
 
 concurrency:
   group: models
@@ -65,7 +74,41 @@ env:
   TARGET: unicum-gg/wot.models
 
 jobs:
+  # Which branches this run is about. A job of its own because a matrix cannot
+  # read an input: `if` at the job level has no `matrix` to test, so the choice
+  # has to be made before the matrix exists.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      branches: ${{ steps.pick.outputs.branches }}
+    steps:
+      - id: pick
+        env:
+          WANTED: ${{ inputs.branches }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"branch":"WG","host":"wgus-woteu.wargaming.net","guid":"WOT.EU.PRODUCTION"},
+            {"branch":"WG_CT","host":"wgus-wotct.wargaming.net","guid":"WOT.CT.PRODUCTION"},
+            {"branch":"Lesta","host":"lstus-ru.lesta.ru","guid":"MT.RU.PRODUCTION"},
+            {"branch":"Lesta_PT","host":"lstus-ru.lesta.ru","guid":"MT.PT.PRODUCTION"}
+          ]'
+          if [ -z "${WANTED:-}" ]; then
+            picked=$(jq -c . <<<"$all")
+          else
+            picked=$(jq -c --arg w "$WANTED" \
+              '[$w | split(",") | .[] | gsub("^\\s+|\\s+$";"")] as $want
+               | [.[] | select(.branch as $b | $want | index($b))]' <<<"$all")
+          fi
+          if [ "$(jq 'length' <<<"$picked")" = "0" ]; then
+            echo "::error::none of the branches in '${WANTED}' exist. Known: WG, WG_CT, Lesta, Lesta_PT."
+            exit 1
+          fi
+          echo "branches=${picked}" >> "$GITHUB_OUTPUT"
+          jq -r '.[] | "building \(.branch)"' <<<"$picked"
+
   models:
+    needs: plan
     runs-on: ubuntu-latest
     # A release branch measured 5h07 on a runner, against the six hours a job
     # gets. What is left after that is for the pushes, so this sits as close to
@@ -75,19 +118,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        include:
-          - branch: WG
-            host: wgus-woteu.wargaming.net
-            guid: WOT.EU.PRODUCTION
-          - branch: WG_CT
-            host: wgus-wotct.wargaming.net
-            guid: WOT.CT.PRODUCTION
-          - branch: Lesta
-            host: lstus-ru.lesta.ru
-            guid: MT.RU.PRODUCTION
-          - branch: Lesta_PT
-            host: lstus-ru.lesta.ru
-            guid: MT.PT.PRODUCTION
+        include: ${{ fromJSON(needs.plan.outputs.branches) }}
 
     steps:
       - uses: actions/checkout@v4
