@@ -339,6 +339,18 @@ export async function publish(
         model.camouflage = { ...held.camouflage, ...model.camouflage };
         if (!Object.keys(model.slots).length) delete model.slots;
         if (!Object.keys(model.camouflage).length) delete model.camouflage;
+        // **And what the scripts said, which a run can lose while every mesh
+        // arrives intact.** These two come from `scripts.pkg` rather than from
+        // any geometry: how high the chassis carries the hull, and which piece
+        // each module draws. A run narrowed to one package family and not
+        // naming that one republished 120 tier X vehicles with both missing.
+        // Nothing failed. Every mesh was there, every texture was there, and
+        // every one of those tanks was drawn sunk into its own tracks with no
+        // module a reader could choose. The sweep now always takes the scripts,
+        // so this is the second lock on the same door: a value the mirror holds
+        // is not dropped because this run had nothing to say about it.
+        if (!model.hullPosition && held.hullPosition) model.hullPosition = held.hullPosition;
+        if (!Object.keys(model.modules ?? {}).length && held.modules) model.modules = held.modules;
         compact(model);
       }
       files.push(["model.json", model]);

@@ -127,6 +127,16 @@ export function packages(archive: SparseArchive, settings: Settings): Map<string
   const out = new Map<string, Block>();
   for (const block of archive.index().values()) {
     if (!/packages\/.+\.pkg$/.test(block.name)) continue;
+    // **The scripts are never optional, whatever a run asked for.** They are
+    // what says how high a chassis carries its hull and which piece each module
+    // draws, for every vehicle the run publishes. A narrowed run that leaves
+    // them out does not fail: it republishes 120 tier X vehicles with no hull
+    // position and no modules at all, which draws every one of them sunk into
+    // its own tracks. Twenty-three megabytes against that.
+    if (SCRIPT_PACKAGE.test(block.name)) {
+      out.set(block.name, block);
+      continue;
+    }
     if (settings.packages && !settings.packages.some((p) => block.name.includes(p))) continue;
     out.set(block.name, block);
   }

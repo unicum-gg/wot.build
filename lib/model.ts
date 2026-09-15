@@ -104,6 +104,15 @@ export type VehicleModel = {
   /** Absent when the client ships no path for this vehicle. */
   tracks?: Tracks;
   /**
+   * Which piece each module draws, under the game's own name for the module.
+   *
+   * Published for every vehicle that has more than one of anything, so a build
+   * chosen in a configurator can be the build on screen. Written by the builder
+   * since the first version of this file and never declared here, which is how
+   * a guard that meant to keep it could not compile against it.
+   */
+  modules?: Record<string, string>;
+  /**
    * The vehicle's 3D styles, by the name the client gives each one.
    *
    * A style is a complete set of pieces with textures of its own, published
