@@ -133,17 +133,30 @@ export function finishMaterials(
     return { ...material, textures };
   });
   
+  // **A material with nothing but the shared maps has no colour**, and the
+  // renderer draws a material with no colour as white. `colorIdMap` and
+  // `metallicDetailMap` are the same two files for the whole catalogue, so a
+  // material left holding only those has lost every texture of its own, which
+  // is the case this fills in; one that kept a diffuse map is dressed and is
+  // left alone. Counting textures instead let the AMX 50 B's Improved Mechanism
+  // through with its detail map and nothing else, and the tank was published
+  // with white patches over its turret and its hull.
+  const SHARED = new Set(["colorIdMap", "metallicDetailMap"]);
+  const dressed = (m: Material) =>
+    Object.keys(m.textures).some((property) => !SHARED.has(property));
   // Fill in the ones the client left empty, from the richest material the
   // vehicle has that is not itself empty. Preferring one whose name shares a
   // part with theirs keeps a turret with a turret where both exist.
-  const donors = finished.filter((m) => Object.keys(m.textures).length > 0);
+  const donors = finished.filter(dressed);
   if (donors.length > 0) {
     for (const material of finished) {
-      if (Object.keys(material.textures).length > 0) continue;
+      if (dressed(material)) continue;
       const part = material.name.replace(/^tank_/, "").replace(/_skinned$/, "");
       const named = donors.find((d) => d.name.includes(part));
       const donor = named ?? donors.reduce((a, b) => (Object.keys(b.textures).length > Object.keys(a.textures).length ? b : a));
-      material.textures = donor.textures;
+      // The shared maps it already had are kept: they are correct, and the
+      // donor carries the same two anyway.
+      material.textures = { ...donor.textures, ...material.textures };
       material.shader = material.shader || donor.shader;
       material.inheritedFrom = donor.name;
     }

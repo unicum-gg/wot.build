@@ -110,6 +110,29 @@ function skinGlobs(settings: Settings, wanted: ReadonlySet<string>): string[] {
 const DECAL_GLOBS = ["gui/maps/vehicles/decals/*", "gui/maps/vehicles/decals/*/*", "gui/maps/vehicles/decals/*/*/*"];
 
 /**
+ * The packages a narrowed run sweeps whatever it was asked for.
+ *
+ * **A package's name does not describe its contents**, which is the note on
+ * `packages` below and the reason this exists: the AMX 50 B's Improved
+ * Mechanism keeps its equipment and damage textures in `particles.pkg`, and the
+ * IS-7's Hardline keeps a whole hull there. Asked for `vehicles_level_10`
+ * alone, that style was published with a material holding no colour at all, and
+ * the tank was drawn with white patches across its turret and hull.
+ *
+ * So `--package` narrows the tiers, which is what a person means by it, and
+ * these are swept regardless: the shared and sandbox content, the catch-alls,
+ * the interface, and the scripts every vehicle needs.
+ *
+ * **The maps are what is left out, and they are most of the client.** A
+ * hundred-odd packages named for the arena they draw, each a hundred megabytes,
+ * holding no vehicle. Their names all begin with the arena's number, which is a
+ * convention Wargaming has kept for as long as this mirror has read them; the
+ * sound and the shaders go with them for the same reason.
+ */
+const ALWAYS =
+  /packages\/(?!\d+_|audioww|shaders|vehicles_level_)[^/]+\.pkg$/;
+
+/**
  * Every package a part holds, keyed by name.
  *
  * **All of them**, because a package's name does not describe its contents. The
@@ -137,7 +160,9 @@ export function packages(archive: SparseArchive, settings: Settings): Map<string
       out.set(block.name, block);
       continue;
     }
-    if (settings.packages && !settings.packages.some((p) => block.name.includes(p))) continue;
+    // **A narrowed run drops other tiers, never the packages a vehicle's own
+    // files can hide in.** See `ALWAYS`.
+    if (settings.packages && !settings.packages.some((p) => block.name.includes(p)) && !ALWAYS.test(block.name)) continue;
     out.set(block.name, block);
   }
   return out;

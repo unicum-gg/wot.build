@@ -85,6 +85,8 @@ jobs:
       - id: pick
         env:
           WANTED: ${{ inputs.branches }}
+          PACKAGES: ${{ inputs.packages }}
+          SKINS: ${{ inputs.skins }}
         run: |
           set -euo pipefail
           all='[
@@ -104,8 +106,32 @@ jobs:
             echo "::error::none of the branches in '${WANTED}' exist. Known: WG, WG_CT, Lesta, Lesta_PT."
             exit 1
           fi
-          echo "branches=${picked}" >> "$GITHUB_OUTPUT"
-          jq -r '.[] | "building \(.branch)"' <<<"$picked"
+          # **One launch has to be able to mean the whole catalogue.**
+          #
+          # Taking the optional 3D styles roughly doubles the mirror, and a job
+          # gets six hours: the tier X pass alone ran 1h19 before the shared and
+          # catch-all packages were added back to it. So a run asking for the
+          # styles with no tiers named is spread over one job per group of them,
+          # in series, each with its own six hours. Nobody has to come back and
+          # ask for the next tier.
+          #
+          # Grouped rather than one job per tier because the shared packages are
+          # swept by every job and are most of an hour on their own: four groups
+          # pay that four times instead of eleven.
+          groups='["vehicles_level_01,vehicles_level_02,vehicles_level_03",
+                   "vehicles_level_04,vehicles_level_05,vehicles_level_06",
+                   "vehicles_level_07,vehicles_level_08",
+                   "vehicles_level_09,vehicles_level_10,vehicles_level_11"]'
+          if [ -n "${PACKAGES:-}" ]; then
+            work=$(jq -c --arg p "$PACKAGES" '[$p]' <<<'[]')
+          elif [ "${SKINS:-}" = "true" ]; then
+            work=$(jq -c . <<<"$groups")
+          else
+            work='[""]'
+          fi
+          matrix=$(jq -c --argjson w "$work" '[.[] as $b | $w[] | $b + {packages: .}]' <<<"$picked")
+          echo "branches=${matrix}" >> "$GITHUB_OUTPUT"
+          jq -r '.[] | "building \(.branch)\(if .packages == "" then "" else " [" + .packages + "]" end)"' <<<"$matrix"
 
   models:
     needs: plan
@@ -188,7 +214,7 @@ jobs:
         # command line: it is the one input a person types, and an interpolated
         # string is a shell injection waiting for someone to be clever in it.
         env:
-          PACKAGES: ${{ inputs.packages }}
+          PACKAGES: ${{ matrix.packages }}
         run: |
           npm run models -- --host "${{ matrix.host }}" --guid "${{ matrix.guid }}" --out out \
             ${{ inputs.force && '--force' || '' }} ${{ inputs.skins && '--skins' || '' }} \
