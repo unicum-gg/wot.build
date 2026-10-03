@@ -53,8 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install 7-Zip
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Install 7-Zip and the delta decoders
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full xdelta3 rdiff
 
       - name: Free disk space
         run: |

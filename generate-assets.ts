@@ -28,6 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { SparseArchive } from "./lib/archive.js";
 import { walk, writeFile } from "./lib/harvest.js";
+import { drainPatches, rebuildPackage, recipes } from "./lib/patched.js";
 import { resolveClient } from "./lib/wgus.js";
 
 const args = process.argv.slice(2);
@@ -201,19 +202,25 @@ async function main(): Promise<void> {
       const partDir = path.join(workDir, part);
       fs.rmSync(partDir, { recursive: true, force: true });
       fs.mkdirSync(partDir, { recursive: true });
-      const archive = await SparseArchive.open(partDir, chain[0].volumes);
-      const packages = [...archive.index().values()].filter(
-        (b) =>
-          PACKAGE.test(b.name) &&
-          !SKIPPED.test(b.name) &&
-          (!ONLY || ONLY.some((name) => b.name.includes(name))),
-      );
-      log(`${part}: ${packages.length} packages to scan for ${PUBLISHED}`);
+      // The chain's first link is the full install; the rest are the builds
+      // published since. Reading only the install publishes the game as it was
+      // when that install was cut, which is what this mirror used to do: the
+      // markers app it served was five builds behind the live client.
+      const [full, ...patches] = chain;
+      const archive = await SparseArchive.open(partDir, full.volumes);
+      const wanted = (name: string) =>
+        PACKAGE.test(name) &&
+        !SKIPPED.test(name) &&
+        (!ONLY || ONLY.some((only) => name.includes(only)));
+      const drained = await drainPatches(patches, workDir, wanted, log);
+      const plan = recipes(archive, [...archive.index().values()], wanted, drained);
+      log(`${part}: ${plan.size} packages to scan for ${PUBLISHED}`);
 
-      for (const block of packages) {
+      for (const [name, recipe] of plan) {
+        const block = recipe.base.block;
         const unpackDir = path.join(workDir, "pkg");
         fs.rmSync(unpackDir, { recursive: true, force: true });
-        const pkg = await archive.extract(block, unpackDir);
+        const pkg = await rebuildPackage(recipe, unpackDir);
         const contents = path.join(workDir, "contents");
         fs.rmSync(contents, { recursive: true, force: true });
         // Scoped to `gui` so a package holding anything else costs nothing to
@@ -254,12 +261,13 @@ async function main(): Promise<void> {
           }
         }
         total += kept;
+        const patched = recipe.deltas.length ? ` +${recipe.deltas.length} patched` : "";
         log(
-          `  ${path.basename(block.name)} (${(block.packed / 1e6).toFixed(0)} MB): ${kept} files`,
+          `  ${path.basename(name)} (${(block.packed / 1e6).toFixed(0)} MB${patched}): ${kept} files`,
         );
         fs.rmSync(unpackDir, { recursive: true, force: true });
         fs.rmSync(contents, { recursive: true, force: true });
-        await archive.reset();
+        await recipe.base.archive.reset();
       }
       fs.rmSync(partDir, { recursive: true, force: true });
     }
