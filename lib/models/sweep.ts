@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { SparseArchive, type Block } from "../archive.js";
+import { rebuildPackage } from "../patched.js";
 import { CUSTOMIZATION_GLOBS, VEHICLE_SCRIPTS_GLOB } from "../script.js";
 import { TRACK_GLOB } from "../track.js";
 import { VehicleBuilder } from "../vehicle.js";
@@ -182,10 +183,19 @@ export async function sweep(
    * scripts package has been swept, which is the sweep before all the others.
    */
   skins: ReadonlySet<string> = new Set(),
+  /**
+   * The package's deltas from the patch chain, oldest first.
+   *
+   * Without them the sweep reads the package as the full install shipped it,
+   * which can be many builds old: on EU at 2.4.0.5473 the install sat at
+   * 2.4.0.24013 and `vehicles_level_09` had been patched twice since, so every
+   * tier 9 was published with the geometry it had months earlier.
+   */
+  deltas: readonly string[] = [],
 ): Promise<void> {
   const pkgDir = path.join(archive.dir, "pkg");
   fs.rmSync(pkgDir, { recursive: true, force: true });
-  const pkg = await archive.extract(block, pkgDir);
+  const pkg = await rebuildPackage({ base: { archive, block }, deltas: [...deltas] }, pkgDir);
   // The same patterns for every package, because the name says nothing about
   // what is inside: a package called `particles` holds a vehicle's hull. Asking
   // 7z for a few extra patterns costs nothing next to reading the block, and it

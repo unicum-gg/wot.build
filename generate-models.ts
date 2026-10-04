@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SparseArchive } from "./lib/archive.js";
+import { drainPatches } from "./lib/patched.js";
 import { readVehicleScripts, type VehicleScripts } from "./lib/script.js";
 import { indexPaths } from "./lib/material.js";
 import { TRACK_SEGMENT, type VehicleModel } from "./lib/model.js";
@@ -117,11 +118,13 @@ async function sweepScripts(
   const chain = client.getChain("client");
   if (chain.length === 0) return;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wotmodels-"));
-  const archive = await SparseArchive.open(dir, chain[0].volumes);
+  const [full, ...patches] = chain;
+  const archive = await SparseArchive.open(dir, full.volumes);
   opened.push(archive);
+  const drained = await drainPatches(patches, dir, (name) => SCRIPT_PACKAGE.test(name), log);
   for (const [name, block] of packages(archive, settings)) {
     if (!SCRIPT_PACKAGE.test(name)) continue;
-    await sweep(archive, block, work, settings);
+    await sweep(archive, block, work, settings, new Set(), drained.deltas.get(name) ?? []);
     await archive.reset();
     return;
   }
@@ -188,10 +191,24 @@ async function main(): Promise<void> {
       const chain = client.getChain(part);
       if (chain.length === 0) continue;
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wotmodels-"));
-      const archive = await SparseArchive.open(dir, chain[0].volumes);
+      const [full, ...patches] = chain;
+      const archive = await SparseArchive.open(dir, full.volumes);
       opened.push(archive);
       const blocks = packages(archive, settings);
       if (blocks.size === 0) continue;
+      // The builds published since the install, per package. Without them a
+      // sweep reads the install's copy: on EU at 2.4.0.5473 the install sat at
+      // 2.4.0.24013 and vehicles_level_09 had been patched twice since.
+      const drained = await drainPatches(patches, dir, (name) => blocks.has(name), log);
+      // A package's fingerprint has to answer "is this what we published last
+      // time", and the install's CRC alone cannot: it is the same string after
+      // a patch rewrites the package, so the family reads as unmoved and the
+      // sweep is skipped. The deltas are named for the build and CRC they
+      // carry, so folding their names in makes a new patch a new fingerprint.
+      const stamp = (name: string, crc: string) => {
+        const deltas = drained.deltas.get(name) ?? [];
+        return deltas.length ? `${crc}+${deltas.map((f) => path.basename(f)).join("+")}` : crc;
+      };
       log(`${part}: ${blocks.size} packages`);
       // Scripts first, then vehicles, then the shared textures: a shared texture
       // is only known to be needed once some material has asked for it, which is
@@ -206,10 +223,13 @@ async function main(): Promise<void> {
       const ordered = [...blocks].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b));
       // Decided for the whole part before any of it is swept, since what a
       // package's siblings did is part of the answer for that package.
-      const moved = movedFamilies(held, blocks.values());
+      const moved = movedFamilies(
+        held,
+        [...blocks].map(([name, block]) => ({ name, crc: stamp(name, block.crc) })),
+      );
       let skipped = 0;
       for (const [name, block] of ordered) {
-        seen[name] = block.crc;
+        seen[name] = stamp(name, block.crc);
         // **Unchanged means untouched: not downloaded, not extracted, not
         // converted.** The mirror already holds what this package produced, and
         // the run is about to be handed that tree to publish into, so there is
@@ -221,9 +241,11 @@ async function main(): Promise<void> {
           skipped++;
           continue;
         }
-        await sweep(archive, block, work, settings, skins);
+        const deltas = drained.deltas.get(name) ?? [];
+        await sweep(archive, block, work, settings, skins, deltas);
         await drain(work, converted, scripts);
-        log(`  ${path.basename(name)} (${(block.packed / 1e6).toFixed(0)} MB block), ${vehicles.size} vehicles so far`);
+        const patched = deltas.length ? ` +${deltas.length} patched` : "";
+        log(`  ${path.basename(name)} (${(block.packed / 1e6).toFixed(0)} MB block${patched}), ${vehicles.size} vehicles so far`);
         // Blocks stay in the sparse volumes once filled, so walking every
         // package would materialise the whole part on disk.
         await archive.reset();
