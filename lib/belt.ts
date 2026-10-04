@@ -79,9 +79,28 @@ export function layPaths({
   // calls left comes out at positive x beside the wheels it calls `W_L0`.
   // Taken from the geometry all the same, because the link laid on each side
   // is chosen by this label and a belt fitted backwards is not a small defect.
+  //
+  // **A side can carry more than one belt.** The client declares a `trackPair`
+  // per run and the Object 279 (e) declares two, four belts in all: eight
+  // wheels at each of x = +-0.41 and x = +-1.41. Keyed by side alone, the outer
+  // run overwrote the inner and the tank came out with the middle two only.
+  //
+  // The innermost keeps the bare name, so every two-belt vehicle in the
+  // catalogue is published exactly as it was and a rebuild touches only the
+  // handful that have more. Ordered by distance from the centreline rather
+  // than by the file's index, for the same reason the side is: the geometry
+  // cannot be wrong about which belt is where.
+  const perSide: Record<string, number[][][]> = { left: [], right: [] };
+  for (const points of Object.values(laidOut)) {
+    if (points.length === 0) continue;
+    perSide[points[0][0] >= 0 ? "left" : "right"].push(points);
+  }
   const sided: Record<string, number[][]> = {};
-  for (const [side, points] of Object.entries(laidOut)) {
-    sided[points[0]?.[0] >= 0 ? "left" : "right"] = points;
+  for (const [side, runs] of Object.entries(perSide)) {
+    runs.sort((a, b) => Math.abs(a[0][0]) - Math.abs(b[0][0]));
+    for (const [at, points] of runs.entries()) {
+      sided[at === 0 ? side : `${side}${at}`] = points;
+    }
   }
   return sided;
 }
