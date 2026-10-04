@@ -21,6 +21,7 @@ import sharp from "sharp";
 import { SparseArchive, type Block } from "./lib/archive.js";
 import { decodeDDS, ddsInnerToWebp } from "./lib/dds.js";
 import { fetchText, fetchRange } from "./lib/http.js";
+import { drainPatches, rebuildPackage, recipes, type Recipe } from "./lib/patched.js";
 import { resolveClient } from "./lib/wgus.js";
 
 const args = process.argv.slice(2);
@@ -72,12 +73,29 @@ const log = (msg: string) => console.log(`[wot.maps] ${msg}`);
 /** A sprite's box inside the atlas sheet. */
 type Rect = { x: number; y: number; w: number; h: number };
 
-/** Map id -> its package block, for every map in this part. */
-function mapPackages(archive: SparseArchive): Map<string, Block> {
-  const out = new Map<string, Block>();
-  for (const block of archive.index().values()) {
-    const m = /^res\/packages\/([^/]+)\.pkg$/.exec(block.name);
-    if (m && !NON_MAP.test(m[1])) out.set(m[1], block);
+/** The map id a package name carries, or null when it is not a map's. */
+function mapId(name: string): string | null {
+  const m = /^res\/packages\/([^/]+)\.pkg$/.exec(name);
+  return m && !NON_MAP.test(m[1]) ? m[1] : null;
+}
+
+/**
+ * Map id -> how to rebuild its package at the live version, for this part.
+ *
+ * A map package is read at the chain's end rather than at the full install's,
+ * so a minimap a patch redrew is mirrored (see lib/patched.ts).
+ */
+async function mapPackages(
+  archive: SparseArchive,
+  patches: Parameters<typeof drainPatches>[0],
+  workDir: string,
+): Promise<Map<string, Recipe>> {
+  const wanted = (name: string) => mapId(name) !== null;
+  const drained = await drainPatches(patches, workDir, wanted, log);
+  const out = new Map<string, Recipe>();
+  for (const [name, recipe] of recipes(archive, [...archive.index().values()], wanted, drained)) {
+    const id = mapId(name);
+    if (id) out.set(id, recipe);
   }
   return out;
 }
@@ -104,10 +122,11 @@ function innerMinimaps(pkg: string, id: string): string[] {
   return found.sort();
 }
 
-async function extractMap(archive: SparseArchive, block: Block, id: string): Promise<void> {
+async function extractMap(recipe: Recipe, id: string): Promise<void> {
+  const archive = recipe.base.archive;
   const work = path.join(archive.dir, "pkg");
   fs.rmSync(work, { recursive: true, force: true });
-  const pkg = await archive.extract(block, work);
+  const pkg = await rebuildPackage(recipe, work);
   const mapsDir = path.join(OUT, "maps");
   fs.mkdirSync(mapsDir, { recursive: true });
   const inners = innerMinimaps(pkg, id);
@@ -311,7 +330,7 @@ async function main(): Promise<void> {
   }
 
   const opened: SparseArchive[] = [];
-  const byId = new Map<string, { archive: SparseArchive; block: Block }>();
+  const byId = new Map<string, Recipe>();
   try {
     for (const part of PARTS) {
       const chain = client.getChain(part);
@@ -320,10 +339,13 @@ async function main(): Promise<void> {
         continue;
       }
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wotmaps-"));
-      const archive = await SparseArchive.open(dir, chain[0].volumes);
+      // The install first, then the builds published since: a map package read
+      // at the install alone is as old as the install (see lib/patched.ts).
+      const [full, ...patches] = chain;
+      const archive = await SparseArchive.open(dir, full.volumes);
       opened.push(archive);
-      const packages = mapPackages(archive);
-      for (const [id, block] of packages) if (!byId.has(id)) byId.set(id, { archive, block });
+      const packages = await mapPackages(archive, patches, dir);
+      for (const [id, recipe] of packages) if (!byId.has(id)) byId.set(id, recipe);
       log(`${part}: ${packages.size} map packages`);
     }
 
@@ -331,18 +353,19 @@ async function main(): Promise<void> {
     let ok = 0;
     const missing: string[] = [];
     for (const id of ids) {
-      const entry = byId.get(id);
-      if (!entry) {
+      const recipe = byId.get(id);
+      if (!recipe) {
         missing.push(id);
         continue;
       }
       try {
-        await extractMap(entry.archive, entry.block, id);
+        await extractMap(recipe, id);
         ok++;
-        log(`  ${id} (${(entry.block.packed / 1e6).toFixed(1)} MB block)`);
+        const patched = recipe.deltas.length ? ` +${recipe.deltas.length} patched` : "";
+        log(`  ${id} (${(recipe.base.block.packed / 1e6).toFixed(1)} MB block${patched})`);
         // Drop the block: walking every map would otherwise materialise the
         // whole part on disk.
-        await entry.archive.reset();
+        await recipe.base.archive.reset();
       } catch (e) {
         missing.push(id);
         log(`  ! ${id}: ${(e as Error).message}`);
