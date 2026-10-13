@@ -39,7 +39,18 @@ const PYTHON = process.env.WOTSRC_PYTHON ?? "python3";
  * build for words nothing reads. Adding one here is a word, and the names in it
  * are still the client's rather than ours.
  *
- * The seven here are the ones the site reads by key, and each was measured
+ * **This list has to carry everything the reader asks for.** It is the
+ * publishing half of a pair: `GameCatalogue` in the site's
+ * `source/wot/game-locales.ts` is the consuming half, and nothing connects them
+ * across the two repositories. A catalogue added there and not here does not
+ * fail loudly: the reader simply finds nothing, writes an empty namespace over
+ * the committed one, and the translations disappear in every language at once.
+ * That is how `ingame_gui` arrived, on 2026-10-12, and emptied the battle
+ * messages and chat commands for all thirty-three. When adding one, add it in
+ * both places and run the site's `game-locales` to see the diff before trusting
+ * it.
+ *
+ * The ones here are what the site reads by key, and each was measured
  * against the French client before being added rather than assumed:
  * `arenas` names every map and every battle type (`type/comp7/name` is how we
  * know Onslaught is "Offensive" in French); `artefacts` the equipment,
@@ -52,7 +63,8 @@ const PYTHON = process.env.WOTSRC_PYTHON ?? "python3";
  * vocabulary of the client's own player profile, which is what our profile page
  * is a version of, so the game already has a word for most of what it says
  * ("Achievements" is "Faits d'armes" in French, not a translation anyone would
- * reach for).
+ * reach for); and `ingame_gui`, the messages the client shows during a battle
+ * and the chat commands a player sends with them.
  *
  * Deliberately NOT here: the `<nation>_vehicles` catalogues. A tank's name is a
  * proper noun and Wargaming does not translate it (9 of 1,638 differ in French,
@@ -61,7 +73,7 @@ const PYTHON = process.env.WOTSRC_PYTHON ?? "python3";
  * ARE translated, and are the one thing worth revisiting if the site starts
  * showing them.
  */
-const CATALOGUES = (flag("--catalogues") ?? "arenas,artefacts,crew_perks,veh_skill_tree,menu,comp7.comp7_ext,profile")
+const CATALOGUES = (flag("--catalogues") ?? "arenas,artefacts,crew_perks,veh_skill_tree,menu,comp7.comp7_ext,profile,ingame_gui")
   .split(",")
   .map((c) => c.trim().toLowerCase())
   .filter(Boolean);
