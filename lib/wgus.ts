@@ -18,6 +18,8 @@ export type Client = {
   versionName: string;
   /** Full install first, then each incremental patch in application order. */
   getChain: (part: string) => Patch[];
+  /** The languages this build ships, as the launcher offers them. */
+  languages: string[];
 };
 
 const match = (s: string, re: RegExp) => (s.match(re) ?? [])[1];
@@ -69,7 +71,11 @@ function order(patches: Patch[]): Patch[] {
  * Resolves to `null` when the branch simply has no build published, which is a
  * normal state rather than a failure.
  */
-export async function resolveClient(host: string, guid: string): Promise<Client | null> {
+export async function resolveClient(
+  host: string,
+  guid: string,
+  language?: string,
+): Promise<Client | null> {
   let currentHost = host;
   for (let hop = 0; ; hop++) {
     const meta = await fetchText(
@@ -79,8 +85,23 @@ export async function resolveClient(host: string, guid: string): Promise<Client 
     if (!version) throw new Error(`no metadata version for ${guid} on ${currentHost}`);
     // Some publishers redirect the app id itself (Lesta does).
     const appId = match(meta, /<redirect_application_id>([^<]+)<\/redirect_application_id>/) ?? guid;
-    // The language has to be one the build ships.
-    const lang = match(meta, /<default_language>([^<]+)<\/default_language>/) ?? "EN";
+    // The language has to be one the build ships. `supported_languages` is the
+    // list the launcher offers, and the locale part is served per language: the
+    // same build answers with `..._locale_fr.wgpkg` when asked for FR. Asking
+    // for one it does not ship falls back to the default rather than failing,
+    // so the caller checks the list rather than trusting the answer.
+    const supported = (match(meta, /<supported_languages>([^<]*)<\/supported_languages>/) ?? "")
+      .split(",")
+      .map((l) => l.trim().toUpperCase())
+      .filter(Boolean);
+    const fallback = match(meta, /<default_language>([^<]+)<\/default_language>/) ?? "EN";
+    const wanted = language?.toUpperCase();
+    if (wanted && supported.length > 0 && !supported.includes(wanted)) {
+      throw new Error(
+        `${guid} does not ship ${wanted} (ships ${supported.join(", ")})`,
+      );
+    }
+    const lang = wanted ?? fallback;
     const hd = match(meta, /<client_type\b[^>]*\bid="hd"[^>]*>([\s\S]*?)<\/client_type>/) ?? "";
     const parts = matchAll(hd, /<client_part\b[^>]*\bid="([^"]+)"/g).map((m) => m[1]);
 
@@ -147,6 +168,7 @@ export async function resolveClient(host: string, guid: string): Promise<Client 
       version,
       versionName,
       getChain: (part) => order(byPart.get(part) ?? []),
+      languages: supported,
     };
   }
 }

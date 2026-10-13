@@ -8,7 +8,8 @@
     "maps": "tsx generate-maps.ts",
     "typecheck": "tsc --noEmit",
     "models": "tsx generate-models.ts",
-    "warm": "tsx warm-models.ts"
+    "warm": "tsx warm-models.ts",
+    "locales": "tsx generate-locales.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

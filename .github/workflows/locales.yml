@@ -1,0 +1,80 @@
+name: locales
+
+# Publishes the client's own gettext catalogues, one directory per language, to
+# the `LOCALES` branch.
+#
+# Its own workflow rather than a step of `build`: this is a union across clients
+# (no single one ships every language) writing a single branch, where `build` is
+# one job per client each writing its own. It also needs none of that job's
+# weight, no decompiler, no Java, no tens of gigabytes, so it runs in minutes.
+on:
+  schedule:
+    - cron: "30 6 * * *" # after the daily client build
+  workflow_dispatch:
+
+concurrency:
+  group: locales
+  cancel-in-progress: false
+
+env:
+  # The mirror this writes to. Named rather than assumed: the generator moved
+  # here from wot.src, where the branch it publishes was simply `origin`, and
+  # leaving that implicit would have put a LOCALES branch on the build repo
+  # instead of on the mirror everything reads.
+  TARGET: unicum-gg/wot.src
+
+jobs:
+  locales:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout generator (main)
+        uses: actions/checkout@v4
+        with:
+          # Same reason as `build`: the org denies write to GITHUB_TOKEN, and
+          # checkout is where the credential has to be set.
+          token: ${{ secrets.SYNC_PAT }}
+
+      - name: Install extraction tools
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: python -m pip install --quiet polib
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Checkout the target branch
+        run: |
+          git config --global user.name "wot.build"
+          git config --global user.email "actions@users.noreply.github.com"
+          if git ls-remote --exit-code --heads "https://github.com/${TARGET}.git" LOCALES >/dev/null; then
+            git clone --depth 1 --branch LOCALES \
+              "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
+          else
+            git clone --depth 1 "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/${TARGET}.git" out
+            git -C out checkout --orphan LOCALES
+            git -C out rm -rq --cached . || true
+          fi
+
+      - name: Generate
+        env:
+          WOTSRC_PYTHON: python
+        run: npm run locales -- --out out
+
+      - name: Commit & push if changed
+        working-directory: out
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes"
+            exit 0
+          fi
+          git commit -m "🍱 update client locale catalogues"
+          git push origin HEAD:LOCALES
