@@ -111,6 +111,7 @@ export function readVehicleScripts(dir: string): VehicleScripts {
           chain: null,
           carried: [],
           shells: {},
+          drawn: {},
           modules: {},
           prefabs: {},
           sets: {},
@@ -146,6 +147,7 @@ export function readVehicleScripts(dir: string): VehicleScripts {
           chain: null,
           carried: [],
           shells: {},
+          drawn: {},
           modules: {},
           prefabs: {},
           sets: {},
@@ -192,6 +194,13 @@ export function readVehicleScripts(dir: string): VehicleScripts {
         }
         for (const [piece, from] of Object.entries(read.shells)) {
           if (!target.shells[piece] || own) target.shells[piece] = from;
+        }
+        // The same rule for where the mesh is. The vehicle's own script wins,
+        // which is what keeps a clone from redirecting a piece: the Gonsalo
+        // merges into the Caliban's folder and names its own gun there, and
+        // the Caliban's own script has already claimed that piece.
+        for (const [piece, from] of Object.entries(read.drawn)) {
+          if (!target.drawn[piece] || own) target.drawn[piece] = from;
         }
         for (const [key, piece] of Object.entries(read.modules)) {
           if (!target.modules[key] || own) target.modules[key] = piece;

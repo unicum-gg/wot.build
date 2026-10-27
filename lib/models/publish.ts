@@ -22,76 +22,11 @@ import { fold } from "./catalogue.js";
 import { SKIN_FOLDER, type Catalogue } from "./sweep.js";
 import type { Measured } from "./convert.js";
 import { log, type Settings } from "./settings.js";
+import { borrowPieces, compact, graft, readManifest } from "./graft.js";
 
 /** Write the accumulated collision and model files, returning what was written. */
 /** The client's grey stand-in for a vehicle it no longer ships. */
 const PLACEHOLDER = /_Placeholder$/;
-
-/**
- * Drop the materials no piece draws with, renumbering the ones that stay.
- *
- * **Grafting appends a whole list to keep the arithmetic simple**, and a
- * manifest that is grafted into on run after run would carry the donor's list
- * again every time: a vehicle whose pieces arrive from two packages would grow
- * its material list at every incremental build until it is mostly dead weight.
- * A material is reachable only through a mesh, so what nothing names can go.
- */
-function compact(model: VehicleModel): void {
-  const used = new Map<number, number>();
-  for (const piece of Object.values(model.pieces)) {
-    for (const mesh of piece.meshes) {
-      for (const index of mesh.materials) {
-        if (!used.has(index)) used.set(index, used.size);
-      }
-    }
-  }
-  if (used.size === model.materials.length) return;
-  const kept = [...used.keys()].map((index) => model.materials[index]);
-  for (const piece of Object.values(model.pieces)) {
-    for (const mesh of piece.meshes) {
-      mesh.materials = mesh.materials.map((index) => used.get(index) ?? 0);
-    }
-  }
-  model.materials = kept;
-}
-
-/** A manifest already on the mirror, or null where there is none to read. */
-function readManifest(at: string): VehicleModel | null {
-  try {
-    return JSON.parse(fs.readFileSync(at, "utf8")) as VehicleModel;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Copy pieces from another manifest into this one.
- *
- * **The material index is the whole difficulty.** A mesh names its material by
- * position in its own manifest's list, so a piece moved between two manifests
- * keeps a number that now points at something else: a track drawn with a gun's
- * paint, a hull with a turret's. The donor's list is appended and the grafted
- * indices are shifted by where it starts.
- *
- * `from` is how the copied files are reached from the manifest being written,
- * empty where both sit in the same folder.
- */
-function graft(model: VehicleModel, donor: VehicleModel, pieces: string[], from = ""): void {
-  if (pieces.length === 0) return;
-  const offset = model.materials.length;
-  model.materials = [...model.materials, ...donor.materials];
-  for (const name of pieces) {
-    const piece = structuredClone(donor.pieces[name]);
-    model.pieces[name] = {
-      ...piece,
-      glb: from ? `${from}/${piece.glb}` : piece.glb,
-      meshes: piece.meshes.map((mesh) => ({
-        ...mesh,
-        materials: mesh.materials.map((index) => index + offset),
-      })),
-    };
-  }
-}
 
 /**
  * Every texture the mirror already carries, by the path a material names it at.
@@ -462,6 +397,11 @@ export async function publish(
     fs.writeFileSync(path.join(settings.out, "based-on.json"), based);
     bytes += Buffer.byteLength(based);
   }
+
+  // **A piece a vehicle keeps in another vehicle's folder**, before the two
+  // passes below: a style grafts from the tank underneath, and a tank with a
+  // hole in it would hand that hole to every style it wears.
+  borrowPieces(scripts, settings);
 
   // **The belt a variant borrows, once every vehicle is on disk.**
   //

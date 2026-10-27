@@ -84,6 +84,23 @@ export type VehicleScript = {
   carried: string[];
   /** Which vehicle each piece's armour comes from, by piece, as `nation/code`. */
   shells: Record<string, string>;
+  /**
+   * And which vehicle's folder each piece's MESH sits in, read the same way.
+   *
+   * Usually the vehicle's own, and worth recording anyway because sometimes it
+   * is not: the 111 Vz. 51 keeps its hull, turret and gun under its own name
+   * and points its chassis at the 111 1-2-3's folder, and the 50TP Prototyp
+   * (Resilient) ships a hull and borrows the other three. The conversion walks
+   * folders, so a piece declared in another one is never seen at all, and the
+   * vehicle is published with a hole in it: no running gear, nothing to turn
+   * the wheels, and on the Polish one no gun either.
+   *
+   * This is what the armour already records one line up, for the mesh instead
+   * of the hit tester. The two are independent: a variant can draw its own
+   * meshes and borrow the armour, which is how a reskin is built, or draw
+   * another's meshes and keep its own name.
+   */
+  drawn: Record<string, string>;
   /** Which piece each module draws, by the key the scripts name it with. */
   modules: Record<string, string>;
   /**
@@ -195,6 +212,11 @@ export function collect(node: PackedNode, into: VehicleScript, under?: string): 
     // configurator can be shown the gun they picked instead of whichever piece
     // happened to sort first.
     into.modules[node.name] ??= model.piece;
+    // Where this piece's mesh lives, which the path already said and nothing
+    // was keeping. Last wins, as the armour below does and for the same
+    // reason: several turrets or guns share one model and the later ones are
+    // the upgrades.
+    into.drawn[model.piece] = model.content;
     const { armor, spaced } = plates(child(node, "armor"));
     // Several turrets or guns can share one model, the later ones being
     // upgrades. The last wins, which is the fully upgraded vehicle a viewer
