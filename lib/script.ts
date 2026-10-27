@@ -107,6 +107,7 @@ export function readVehicleScripts(dir: string): VehicleScripts {
           armor: {},
           spaced: {},
           wheels: {},
+          beltOfWheel: {},
           spline: null,
           chain: null,
           carried: [],
@@ -143,6 +144,7 @@ export function readVehicleScripts(dir: string): VehicleScripts {
           armor: {},
           spaced: {},
           wheels: {},
+          beltOfWheel: {},
           spline: null,
           chain: null,
           carried: [],
@@ -174,6 +176,9 @@ export function readVehicleScripts(dir: string): VehicleScripts {
         }
         for (const [name, wheel] of Object.entries(read.wheels)) {
           if (!target.wheels[name] || own) target.wheels[name] = wheel;
+        }
+        for (const [name, pair] of Object.entries(read.beltOfWheel)) {
+          if (!target.beltOfWheel[name] || own) target.beltOfWheel[name] = pair;
         }
         for (const [piece, slots] of Object.entries(read.slots)) {
           if (!target.slots[piece] || own) target.slots[piece] = slots;

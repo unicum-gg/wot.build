@@ -41,6 +41,13 @@ export type Wheel = {
    * client has dropped, which is the best that can be said without one.
    */
   wrap: number;
+  /**
+   * Which of the chassis's belts it runs in, where the chassis declares more.
+   *
+   * Absent on a vehicle with one belt a side, which has nothing to say here
+   * that the side does not.
+   */
+  pair?: number;
 };
 
 /** The plain bone a steering bone sits beside, which holds the arm and not the disc. */

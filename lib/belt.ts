@@ -1,109 +1,18 @@
 // The belt a chassis wears, and which link goes on which side of it.
 //
-// **A path is not a belt.** The client authors a run per side and the wheels
-// move underneath it, so the published belt is the two put together: the path
-// pulled onto the wheels it actually rides, or, for a chassis that ships none,
-// the taut band those wheels leave a chain no choice but to settle into.
+// Where its runs come from and what each one is fitted to is `runs.ts`; this is
+// what the manifest says about them.
 //
 // The side a link belongs on is read off the coordinates rather than off the
 // file's own name. The client's `left` does survive the mirror, since X is the
 // axis the flip negates and its left-and-right lives there, but a link fitted
 // to the wrong side is exactly the defect this exists to prevent, and the
 // coordinates cannot be wrong about it.
-import { beltAround, hugWheels, mirrorPath, type BeltWheel } from "./track.js";
+import { layPaths } from "./runs.js";
 import { TRACK_SEGMENT, trackSegment } from "./model.js";
-import type { ChassisSpline, PhysicalTrack } from "./chassis.js";
-import type { Piece, Tracks } from "./model.js";
+import type { ChassisBelt, PhysicalTrack } from "./chassis.js";
+import type { BeltRun, Piece, Tracks } from "./model.js";
 import type { Wheel } from "./wheels.js";
-
-/**
- * Where a belt hangs, per side, from the paths the chassis authored.
- *
- * Lifted out of `beltOf` because it answers on its own, and because a vehicle
- * that has to borrow its link still lays it along paths of its own: publishing
- * the donor's instead moved the Churchill St. Gloriana's belt 74 mm back from
- * the front of its own wheels.
- */
-export function layPaths({
-  paths,
-  chain,
-  wheels,
-}: {
-  /** The runs the chassis authored, by the file each came from. */
-  paths: Record<string, number[][]>;
-  chain: PhysicalTrack | null;
-  /** The wheels as they came out, which is what a belt is fitted to. */
-  wheels: BeltWheel[];
-}): Record<string, number[][]> {
-  // Most vehicles ship a path per side, but a symmetrical one ships a single
-  // file and expects the other side to be its mirror.
-  const laidOut: Record<string, number[][]> = { ...paths };
-  // A chassis that chains its belt ships no path to lay it along, so the
-  // wheels are the only thing that says where it goes. What a chain pulled
-  // tight around them settles into is the taut band, and the client agrees:
-  // the band round the Strv 103B's eight wheels is 11.18 m, which at the
-  // 132.7 mm link it declares is 84.2 links against the 86 it counts, the
-  // couple of links of slack a real chain carries over its return rollers.
-  if (Object.keys(laidOut).length === 0 && chain) {
-    for (const sign of [1, -1]) {
-      const side = wheels.filter((wheel) => Math.sign(wheel.axle[0]) === sign);
-      if (side.length < 2) continue;
-      // The belt rides on the road wheels, so their plane is its plane.
-      const widest = side.reduce((big, wheel) => (wheel.wrap > big.wrap ? wheel : big));
-      const band = beltAround(
-        side.map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap })),
-        widest.axle[0],
-      );
-      if (band.length >= 3) laidOut[sign > 0 ? "left" : "right"] = band;
-    }
-  }
-  const sides = Object.keys(laidOut);
-  if (sides.length === 1) {
-    const other = sides[0] === "left" ? "right" : "left";
-    laidOut[other] = mirrorPath({ points: laidOut[sides[0]] }).points;
-  }
-  // A belt runs around the wheels on its own side, told apart by which side of
-  // the tank they sit on rather than by their names, which the client keeps
-  // from before the mirror.
-  for (const [side, points] of Object.entries(laidOut)) {
-    if (points.length === 0) continue;
-    const band: BeltWheel[] = wheels
-      .filter((wheel) => Math.sign(wheel.axle[0]) === Math.sign(points[0][0]))
-      .map((wheel) => ({ axle: wheel.axle, wrap: wheel.wrap }));
-    laidOut[side] = hugWheels(points, band);
-  }
-
-  // Name each belt for the side it is actually on, which the coordinates say
-  // and the file name only claims. Measured, the two agree: X is the axis the
-  // mirror negates and the client's left-and-right lives on it, so a path it
-  // calls left comes out at positive x beside the wheels it calls `W_L0`.
-  // Taken from the geometry all the same, because the link laid on each side
-  // is chosen by this label and a belt fitted backwards is not a small defect.
-  //
-  // **A side can carry more than one belt.** The client declares a `trackPair`
-  // per run and the Object 279 (e) declares two, four belts in all: eight
-  // wheels at each of x = +-0.41 and x = +-1.41. Keyed by side alone, the outer
-  // run overwrote the inner and the tank came out with the middle two only.
-  //
-  // The innermost keeps the bare name, so every two-belt vehicle in the
-  // catalogue is published exactly as it was and a rebuild touches only the
-  // handful that have more. Ordered by distance from the centreline rather
-  // than by the file's index, for the same reason the side is: the geometry
-  // cannot be wrong about which belt is where.
-  const perSide: Record<string, number[][][]> = { left: [], right: [] };
-  for (const points of Object.values(laidOut)) {
-    if (points.length === 0) continue;
-    perSide[points[0][0] >= 0 ? "left" : "right"].push(points);
-  }
-  const sided: Record<string, number[][]> = {};
-  for (const [side, runs] of Object.entries(perSide)) {
-    runs.sort((a, b) => Math.abs(a[0][0]) - Math.abs(b[0][0]));
-    for (const [at, points] of runs.entries()) {
-      sided[at === 0 ? side : `${side}${at}`] = points;
-    }
-  }
-  return sided;
-}
 
 /** What the manifest says about the belt, or nothing where there is none. */
 export function beltOf({
@@ -112,14 +21,17 @@ export function beltOf({
   spline,
   chain,
   wheels,
+  ribbons,
 }: {
   pieces: Record<string, Piece>;
   /** The runs the chassis authored, by the file each came from. */
   paths: Record<string, number[][]>;
-  spline: ChassisSpline | null;
+  spline: ChassisBelt[] | null;
   chain: PhysicalTrack | null;
   /** The wheels as they came out, which is what a belt is fitted to. */
   wheels: Wheel[];
+  /** The fixed band the chassis bakes, by side, where it was read. */
+  ribbons?: Record<string, number[][][]> | null;
 }): Tracks | undefined {
   // Which piece each run lays. The chassis names its models by path, so the
   // file's own name is what ties its declaration to what was converted.
@@ -152,48 +64,125 @@ export function beltOf({
     const start = file ? paths[file]?.[0] : undefined;
     return start ? (start[0]! >= 0 ? "left" : "right") : undefined;
   };
-  const clientLeftIsRight = sideOfPath(spline?.left) === "right";
-  const models = spline?.models;
-  const firstRight = named(clientLeftIsRight ? models?.left : models?.right);
-  const secondRight = named(
-    clientLeftIsRight ? models?.secondLeft : models?.secondRight,
-  );
+  /** What one declared belt lays, with the two sides the right way round. */
+  const linksOf = (belt: ChassisBelt | undefined) => {
+    const flipped = sideOfPath(belt?.left) === "right";
+    const models = belt?.models;
+    return {
+      segment: named(flipped ? models?.right : models?.left),
+      segmentRight: named(flipped ? models?.left : models?.right),
+      segment2: named(flipped ? models?.secondRight : models?.secondLeft),
+      segment2Right: named(flipped ? models?.secondLeft : models?.secondRight),
+    };
+  };
+  const sided = layPaths({ paths, belts: spline, chain, wheels, ribbons });
+  // **The belt described here is one that is actually laid.** A chassis can
+  // declare a belt the vehicle no longer wears: the Steel Hunter vehicles
+  // write the short track they start a battle with beside the full one that
+  // replaces it, and it is the full one that survives the lay. Reading the
+  // first declaration regardless left the vehicle described by a link and a
+  // pitch belonging to a belt nothing draws.
+  const first = Object.values(sided)[0]?.belt ?? spline?.[0];
+  const own = linksOf(first);
   // A chained belt names its own link, and naming it matters: the ST-B1 ships
   // two in the same folder, so taking whatever was converted first is a coin
   // toss. Falling back to that still keeps a vehicle drawing the one link it
   // does ship when nothing named it.
-  const first =
-    named(clientLeftIsRight ? models?.right : models?.left) ??
-    named(chain?.model) ??
-    laid[0];
-  const second = named(
-    clientLeftIsRight ? models?.secondRight : models?.secondLeft,
-  );
-  const segment = first ? pieces[first] : undefined;
-  const sided = layPaths({ paths, chain, wheels });
-  return (
-    segment && first && Object.keys(sided).length > 0
+  const segment = own.segment ?? named(chain?.model) ?? laid[0];
+  const piece = segment ? pieces[segment] : undefined;
+  if (!piece || !segment || Object.keys(sided).length === 0) return undefined;
+
+  // **What each run is, where a side carries more than one.** The chassis
+  // gives every belt its own phase along the path and may give it its own link
+  // and its own pitch: the AE Phase I starts one at 271 mm and the other at
+  // 311, and the FV4025 Contriver lays `segment_01` outboard and `segment_02`
+  // inboard. Reading one declaration for all of them put three of the AE
+  // Phase I's four belts out of phase and half the Contriver's on the wrong
+  // link. The wheels go with it because the reader has to rebuild the belt on
+  // them, and grouping them by the side or by the line cannot separate two
+  // belts that share a plane.
+  //
+  // Published only for a vehicle whose sides carry more than one belt each,
+  // which is 23 of them, so every other vehicle comes out of a rebuild
+  // unchanged.
+  const doubled = Object.keys(sided).some((side) => /\d$/.test(side));
+  const runs: Record<string, BeltRun> = {};
+  if (doubled)
+    for (const [side, run] of Object.entries(sided)) {
+      const own = run.belt && run.belt !== first ? run.belt : undefined;
+      const links = linksOf(own);
+      runs[side] = {
+        ...(links.segment && links.segment !== segment ? { segment: links.segment } : {}),
+        ...(links.segmentRight && links.segmentRight !== links.segment
+          ? { segmentRight: links.segmentRight }
+          : {}),
+        ...(links.segment2 ? { segment2: links.segment2 } : {}),
+        ...(links.segment2Right && links.segment2Right !== links.segment2
+          ? { segment2Right: links.segment2Right }
+          : {}),
+        ...(own
+          ? {
+              segmentLength: own.segmentLength,
+              segmentOffset: own.segmentOffset,
+              segment2Offset: own.segment2Offset,
+            }
+          : {}),
+        ...(run.wheels.length > 0 ? { wheels: run.wheels } : {}),
+      };
+    }
+
+  return {
+    segment,
+    ...(own.segmentRight && own.segmentRight !== segment
+      ? { segmentRight: own.segmentRight }
+      : {}),
+    ...(own.segment2 ? { segment2: own.segment2 } : {}),
+    ...(own.segment2Right && own.segment2Right !== own.segment2
+      ? { segment2Right: own.segment2Right }
+      : {}),
+    // A chained belt says how many links go round, which is the one thing a
+    // path cannot: laying that many evenly closes the loop with no part link
+    // at the join, and carries the slack a real chain has over its rollers
+    // without having to model the sag.
+    ...(!first && chain
+      ? { segmentLength: chain.segmentLength, segments: chain.segments }
+      : {}),
+    ...(first
       ? {
-          segment: first,
-          ...(firstRight && firstRight !== first ? { segmentRight: firstRight } : {}),
-          ...(second ? { segment2: second } : {}),
-          ...(secondRight && secondRight !== second ? { segment2Right: secondRight } : {}),
-          // A chained belt says how many links go round, which is the one
-          // thing a path cannot: laying that many evenly closes the loop with
-          // no part link at the join, and carries the slack a real chain has
-          // over its rollers without having to model the sag.
-          ...(!spline && chain
-            ? { segmentLength: chain.segmentLength, segments: chain.segments }
-            : {}),
-          ...(spline
-            ? {
-                segmentLength: spline.segmentLength,
-                segmentOffset: spline.segmentOffset,
-                segment2Offset: spline.segment2Offset,
-              }
-            : {}),
-          paths: sided,
+          segmentLength: first.segmentLength,
+          segmentOffset: first.segmentOffset,
+          segment2Offset: first.segment2Offset,
         }
-      : undefined
-  );
+      : {}),
+    ...(Object.keys(runs).length > 0 ? { belts: runs } : {}),
+    // **One ceiling per side, not one per run.** Two belts down one side are
+    // held by the same hull, and each was measured on its own plane across its
+    // own span, so the two profiles agree wherever they overlap and the first
+    // of them answers for the side. Said only where a ribbon said something.
+    ...(Object.values(sided).some((run) => run.ceiling)
+      ? {
+          ceilings: Object.fromEntries(
+            Object.entries(sided)
+              .filter(([, run]) => run.ceiling)
+              .map(([side, run]) => [side.replace(/\d+$/, ""), run.ceiling!]),
+          ),
+        }
+      : {}),
+    // **And how far the belt's body stands outside the band it is laid on**,
+    // which is the one thing about a link a reader cannot see for itself. Per
+    // run rather than per side, since two belts down one side are two link
+    // models and nothing says they are the same plate.
+    ...(Object.values(sided).some((run) => run.standoff !== undefined)
+      ? {
+          standoffs: Object.fromEntries(
+            Object.entries(sided)
+              .filter(([, run]) => run.standoff !== undefined)
+              .map(([side, run]) => [side, run.standoff!]),
+          ),
+        }
+      : {}),
+    paths: Object.fromEntries(
+      Object.entries(sided).map(([side, run]) => [side, run.points]),
+    ),
+  };
 }

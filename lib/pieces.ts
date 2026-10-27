@@ -21,11 +21,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { decodePacked, isPacked, type PackedNode } from "./packed.js";
 import {
+  chassisBelts,
   chassisSpline,
   chassisPhysicalTrack,
   chassisCarried,
   chassisWheels,
-  type ChassisSpline,
+  type ChassisBelt,
   type ChassisWheel,
   type PhysicalTrack,
 } from "./chassis.js";
@@ -78,8 +79,10 @@ export type VehicleScript = {
   spaced: Record<string, string[]>;
   /** The chassis's wheels, by the node name the skin turns them through. */
   wheels: Record<string, ChassisWheel>;
+  /** Which belt each wheel runs in, where the chassis declares more than one. */
+  beltOfWheel: Record<string, number>;
   /** How the chassis lays its belt: the pitch, the offsets and the models. */
-  spline: ChassisSpline | null;
+  spline: ChassisBelt[] | null;
   /** The wheels the chassis hangs from arms, by skinned bone name. */
   carried: string[];
   /** Which vehicle each piece's armour comes from, by piece, as `nation/code`. */
@@ -229,6 +232,9 @@ export function collect(node: PackedNode, into: VehicleScript, under?: string): 
   }
   for (const [name, wheel] of Object.entries(chassisWheels(node))) {
     if (!into.wheels[name]) into.wheels[name] = wheel;
+  }
+  for (const [name, pair] of Object.entries(chassisBelts(node))) {
+    into.beltOfWheel[name] ??= pair;
   }
   into.spline ??= chassisSpline(node);
   into.chain ??= chassisPhysicalTrack(node);

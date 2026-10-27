@@ -17,7 +17,7 @@ import { wearableStyles } from "./wearable.js";
 import { patternWeights } from "../texture.js";
 import { indexPaths, TEXTURE_EXTENSION, texturePath } from "../material.js";
 import type { VehicleModel } from "../model.js";
-import { layPaths } from "../belt.js";
+import { layPaths } from "../runs.js";
 import { fold } from "./catalogue.js";
 import { SKIN_FOLDER, type Catalogue } from "./sweep.js";
 import type { Measured } from "./convert.js";
@@ -184,7 +184,7 @@ export async function publish(
       ]);
     }
     if (!entry.model.empty) {
-      entry.model.declareWheels(worn?.wheels ?? {});
+      entry.model.declareWheels(worn?.wheels ?? {}, worn?.beltOfWheel ?? {});
       entry.model.declareSpline(worn?.spline ?? null, worn?.chain ?? null);
       entry.model.declareCarried(worn?.carried ?? []);
       entry.model.declareModules(worn?.modules ?? {});
@@ -433,7 +433,10 @@ export async function publish(
     // the vehicle was published with wheels that turn under a track that does
     // not move.
     const spline = script?.spline;
-    const elsewhere = [spline?.models.left, spline?.models.right, spline?.left, spline?.right]
+    // Every belt the chassis declares, since a vehicle that borrows one link
+    // can name a different donor for another.
+    const elsewhere = (spline ?? [])
+      .flatMap((belt) => [belt.models.left, belt.models.right, belt.left, belt.right])
       .map((named) => /^vehicles\/([^/]+\/[^/]+)\//i.exec(named ?? "")?.[1])
       .filter((from): from is string => Boolean(from) && from !== key);
     // **What the descriptors said first, then what the script says.** A link is
@@ -457,8 +460,22 @@ export async function publish(
       // vehicle was converted rather than inherited from an earlier one.
       const authored = vehicles.get(key)?.model.authored ?? {};
       if (Object.keys(authored).length > 0 && (model.wheels?.length ?? 0) > 0) {
-        const laid = layPaths({ paths: authored, chain: null, wheels: model.wheels! });
-        if (Object.keys(laid).length > 0) model.tracks = { ...model.tracks!, paths: laid };
+        // The ribbon goes back in with them, or a belt re-laid here would be
+        // the taut band again on a vehicle whose hull carries its top run.
+        const laid = layPaths({
+          paths: authored,
+          belts: spline,
+          chain: null,
+          wheels: model.wheels!,
+          ribbons: vehicles.get(key)?.model.ribbons,
+        });
+        if (Object.keys(laid).length > 0)
+          model.tracks = {
+            ...model.tracks!,
+            paths: Object.fromEntries(
+              Object.entries(laid).map(([side, run]) => [side, run.points]),
+            ),
+          };
       }
       fs.writeFileSync(at, JSON.stringify(model));
       break;

@@ -11,11 +11,12 @@
 // since a hull and its turret routinely share the detail and colour-id maps.
 import { blocks, readIndices, readUvStream, readVertices, type VertexData } from "./primitives.js";
 import { beltOf } from "./belt.js";
+import { ribbonOf } from "./ceiling.js";
 import { finishMaterials } from "./material.js";
 import { unskin } from "./skin.js";
 import { writeGlb, type GltfBone, type GltfMesh } from "./gltf.js";
 import { mirrorPoint, mirrorPositions, reverseWinding } from "./handedness.js";
-import type { ChassisSpline, ChassisWheel, PhysicalTrack } from "./chassis.js";
+import type { ChassisBelt, ChassisWheel, PhysicalTrack } from "./chassis.js";
 import type { CustomizationSlot } from "./slots.js";
 import type { PieceCamouflage } from "./pieces.js";
 import {
@@ -50,6 +51,27 @@ import {
  * Accumulates a vehicle's pieces, keeping one material list for the whole
  * vehicle so shared textures are declared once.
  */
+/**
+ * The circle this wheel carries its belt on, which is not the one it spans.
+ *
+ * **A drive sprocket's teeth stand through its track.** The belt seats in the
+ * roots, a tooth's depth inside the tips the mesh measures, and taking the mesh
+ * lifts the whole top run by that depth: on the AE Phase I it is 52 mm, and its
+ * fender clears the belt by 7, so the links came up through it. The chassis
+ * says so itself, overriding 5,421 wheels across the catalogue by a median of
+ * 12 mm and a twentieth of them by more than 70.
+ *
+ * The override is what the client's own chain is simulated against, so it is
+ * the belt's circle rather than the wheel's, and it is given in the scale the
+ * vehicle is modelled at: the mesh is not a floor under it, which is the whole
+ * point. A wheel it says nothing about keeps the reading it always had, where
+ * the mesh IS a floor, since a chassis declaring 289 mm road wheels on a mesh
+ * spanning 400 would otherwise float the tank over its own tracks.
+ */
+function seating(declared: ChassisWheel, mesh: number): number {
+  return declared.seat ?? Math.max(declared.wrap ?? declared.radius, mesh);
+}
+
 export class VehicleBuilder {
   private readonly pieces: Record<string, Piece> = {};
   private readonly materials: Material[] = [];
@@ -69,10 +91,25 @@ export class VehicleBuilder {
     return this.paths;
   }
 
+  /**
+   * The fixed band the chassis bakes, by side, as the pieces come in.
+   *
+   * Kept because it is the only thing in the client that says where the top
+   * run really goes on a vehicle whose wheels do not carry it.
+   */
+  private readonly ribbon: Record<string, number[][][]> = { left: [], right: [] };
+
+  /** The ribbon as it was read, for a second pass that re-lays the belt. */
+  get ribbons(): Record<string, number[][][]> {
+    return this.ribbon;
+  }
+
   /** The wheels the chassis turns, gathered as its pieces come in. */
   private readonly wheels: Wheel[] = [];
   /** What the script says about those wheels, which the meshes do not say. */
   private declared: Record<string, ChassisWheel> = {};
+  /** Which belt each wheel runs in, where the chassis declares more than one. */
+  private beltOfWheel: Record<string, number> = {};
 
   /**
    * Take the chassis's own account of its wheels.
@@ -82,8 +119,9 @@ export class VehicleBuilder {
    * and neither is guessable from geometry: a drive sprocket's track sits in the
    * tooth roots, 50 mm inside the tips.
    */
-  declareWheels(wheels: Record<string, ChassisWheel>): void {
+  declareWheels(wheels: Record<string, ChassisWheel>, belts: Record<string, number> = {}): void {
     this.declared = wheels;
+    this.beltOfWheel = belts;
   }
 
   /** Record one side's track path. */
@@ -185,7 +223,11 @@ export class VehicleBuilder {
       }
       reverseWinding(indices.indices);
 
-      // The wheels are read here, with the piece in its final space.
+      // The wheels are read here, with the piece in its final space, and the
+      // ribbon beside them for the same reason: a ceiling read before the flip
+      // would be on the wrong side of the vehicle.
+      const ribbon = ribbonOf(label, vertices.positions, indices.indices);
+      if (ribbon) this.ribbon[ribbon.side].push(...ribbon.triangles);
       const found = wheelsOf(set, vertices);
       for (const wheel of found) {
         if (!this.wheels.some((w) => w.bone === wheel.bone)) this.wheels.push(wheel);
@@ -241,7 +283,7 @@ export class VehicleBuilder {
   private floors = new Map<string, number>();
 
   /** How this chassis lays its belt, once its script has been read. */
-  private spline: ChassisSpline | null = null;
+  private spline: ChassisBelt[] | null = null;
 
   /** How this chassis chains its belt, where it lays none along a path. */
   private chain: PhysicalTrack | null = null;
@@ -263,7 +305,7 @@ export class VehicleBuilder {
   }
 
   /** Told what the chassis declares about its belt, laid or chained. */
-  declareSpline(spline: ChassisSpline | null, chain: PhysicalTrack | null = null): void {
+  declareSpline(spline: ChassisBelt[] | null, chain: PhysicalTrack | null = null): void {
     this.spline = spline;
     this.chain = chain;
   }
@@ -282,23 +324,25 @@ export class VehicleBuilder {
     // where it is. Its names are the tree's, without the `_BlendBone` the skin
     // adds, and it says nothing about a vehicle whose script is gone.
     const wheels = this.wheels.map((wheel) => {
-      const declared = this.declared[wheel.bone.replace(/_BlendBone$/, "")];
-      if (!declared) return wheel;
-      // **Never inside the wheel a player can see.** The chassis is the better
-      // source for what a wheel turns at, and on most vehicles it says a little
-      // more than the rim measures, which is the belt standing proud of it. The
-      // FV304 is the other way round: it declares 289 mm on wheels drawn at 400,
-      // so a belt laid on the declared figure runs straight through them. What
-      // the mesh spans is a floor no declaration gets to go under.
+      const name = wheel.bone.replace(/_BlendBone$/, "");
+      // **Said only where it says something.** A vehicle with one belt a side
+      // files every wheel under it, so publishing that would rewrite every
+      // model in the mirror to carry a zero.
+      const pair = this.beltOfWheel[name];
+      const belted = pair ? { ...wheel, pair } : wheel;
+      const declared = this.declared[name];
+      if (!declared) return belted;
+      // The radius is the chassis's, since it is what the game turns the wheel
+      // at. Where the belt touches it is its own question, below.
       //
       // Measured rather than assumed to be a disc: `wheelsOf` takes the cloud a
       // bone drives, so a bone that also carries an arm would read large. Every
       // wheel checked spans the same height as length to within one percent, so
       // the cloud is the wheel.
       return {
-        ...wheel,
+        ...belted,
         radius: declared.radius,
-        wrap: Math.max(declared.wrap, wheel.wrap),
+        wrap: seating(declared, wheel.wrap),
       };
     });
 
@@ -312,6 +356,7 @@ export class VehicleBuilder {
       spline: this.spline,
       chain: this.chain,
       wheels,
+      ribbons: this.ribbon,
     });
     return {
       features: [MirrorFeature.NormalMask],

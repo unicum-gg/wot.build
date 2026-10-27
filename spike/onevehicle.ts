@@ -148,7 +148,7 @@ async function convertSet(from: string, into: string, wheels: Record<string, Cha
     }
   }
 
-  builder.declareWheels(wheels);
+  builder.declareWheels(wheels, script?.beltOfWheel ?? {});
   // How the client lays the belt: the two link models, the spacing between
   // them and where each run starts. Without it the belt falls back to one
   // model at the length of its own bounding box.

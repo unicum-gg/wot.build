@@ -47,9 +47,42 @@ export type Piece = {
  * every 150. Spacing links by the mesh's own length instead puts the E 100's
  * 205 mm apart and leaves every other one missing.
  */
+/**
+ * What the chassis declares for one belt, where the vehicle wears more than one.
+ *
+ * Every field here is the same field the belt as a whole carries, said again
+ * for a run that was given its own: the AE Phase I phases its fore and aft
+ * belts 40 mm apart and the FV4025 Contriver lays a different link inboard
+ * from outboard. A field is absent where this run matches the belt's own.
+ */
+export type BeltRun = {
+  segment?: string;
+  segmentRight?: string;
+  segment2?: string;
+  segment2Right?: string;
+  segmentLength?: number;
+  segmentOffset?: number;
+  segment2Offset?: number;
+  /** The wheels this run goes around, by bone. */
+  wheels?: string[];
+};
+
 export type Tracks = {
   /** The piece holding the link the first run lays. */
   segment: string;
+  /** The link the belt down the vehicle's right lays, where it differs. */
+  segmentRight?: string;
+  /** The second run's right-side link, on the same terms. */
+  segment2Right?: string;
+  /** How many links go round, where the chassis counts them rather than steps. */
+  segments?: number;
+  /**
+   * What each run lays, where the chassis declares more than one belt.
+   *
+   * Keyed as `paths` is, and absent on the 1,623 chassis that declare one
+   * belt, which have nothing to say here that the fields above do not.
+   */
+  belts?: Record<string, BeltRun>;
   /** The piece holding the second run's link, absent on a single-run belt. */
   segment2?: string;
   /** Metres between two links of one run, as the chassis declares it. */
@@ -67,6 +100,34 @@ export type Tracks = {
    * already sitting on the wheels.
    */
   nodes?: Record<string, number[][]>;
+  /**
+   * Where the hull holds each side's belt down, as `z, y` pairs in metres.
+   *
+   * Read off the ribbon the chassis bakes, which is the belt the game draws
+   * for itself at distance. A reader rebuilds the band from wherever the
+   * wheels have ended up, and the wheels alone cannot say that a return roller
+   * nobody declared, a guide rail or the hull roof is carrying the top run, so
+   * the band comes out as the taut tangent over the tallest wheels and goes
+   * through whatever is above it. Held to this it does not, and a side with
+   * nothing to say carries no entry.
+   *
+   * In the hull's own frame, so a reader tipping a vehicle has to carry these
+   * with the body exactly as it carries a wheel bolted to it.
+   */
+  ceilings?: Record<string, number[][]>;
+  /**
+   * How far each run's belt stands outside the band it is laid on, in metres.
+   *
+   * A link model is laid with its origin on the band, and the modeller put
+   * that origin at the tip of the centre guide rather than on the face that
+   * seats on a wheel. So a reader laying it as it comes draws the whole belt a
+   * guide's height too far out all the way round: the shoes sink into the
+   * ground on the bottom run and come up through the fender on the top one, by
+   * 86 mm on the median vehicle. Read off the chassis's own ribbon, which is
+   * the only thing that says where the belt's outer face really is, and a run
+   * whose ribbon said nothing carries no entry.
+   */
+  standoffs?: Record<string, number>;
   /** Closed paths in the vehicle's space, by side, in metres. */
   paths: Record<string, number[][]>;
 };
