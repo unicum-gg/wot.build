@@ -5,6 +5,7 @@
   "scripts": {
     "sources": "tsx generate-sources.ts",
     "assets": "tsx generate-assets.ts",
+    "client-files": "tsx generate-client-files.ts",
     "maps": "tsx generate-maps.ts",
     "typecheck": "tsc --noEmit",
     "models": "tsx generate-models.ts",
