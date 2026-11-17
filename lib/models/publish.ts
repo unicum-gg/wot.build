@@ -265,6 +265,13 @@ export async function publish(
       // swept: a track whose maps live in a package this run skipped comes back
       // painted like the gun, which draws a belt nobody can see rather than no
       // belt at all. Named here because the manifest is where it lands.
+      // And the ones it now leaves undrawn, named for the same reason: a rule
+      // measured on the event packs is checked against the whole catalogue by
+      // reading this list, not by assuming it holds there too.
+      const hidden = model.materials.filter((material) => material.hidden);
+      if (hidden.length > 0) {
+        log(`  - ${key}: ${hidden.length} material(s) not drawn (${hidden.map((m) => m.name).join(", ")})`);
+      }
       const borrowed = model.materials.filter((material) => material.inheritedFrom);
       if (borrowed.length > 0) {
         log(

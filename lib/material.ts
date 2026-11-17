@@ -31,6 +31,14 @@ export type Material = {
    * common case, and a viewer drawing the empty one gets a white turret.
    */
   inheritedFrom?: string;
+  /**
+   * Set when the client ships the material with no shader and nothing of its
+   * own to draw, which is how it marks geometry that is there for the engine
+   * and not for the eye: the chassis a walking boss rolls on under its legs,
+   * an obelisk's tracks, a bomber's turret, a casemate's one-triangle turret.
+   * A viewer draws nothing with it.
+   */
+  hidden?: true;
 };
 
 // Only the base colour carries colour a viewer has to decode. Everything else
@@ -147,10 +155,20 @@ export function finishMaterials(
   // Fill in the ones the client left empty, from the richest material the
   // vehicle has that is not itself empty. Preferring one whose name shares a
   // part with theirs keeps a turret with a turret where both exist.
+  // **Except the ones the client never draws.** A material with no shader and
+  // nothing of its own is not a piece painted like its neighbour, it is a piece
+  // nobody sees. Measured on the event packs, every one of them is geometry
+  // the engine needs and the game does not show (the Halloween spider's tracks,
+  // which its own renders do not have; an obelisk's hull and tracks; a bomber's
+  // turret and gun), and lending them a neighbour's textures drew a belt in the
+  // gun's paint under a vehicle that walks.
+  for (const material of finished) {
+    if (!material.shader && !dressed(material)) material.hidden = true;
+  }
   const donors = finished.filter(dressed);
   if (donors.length > 0) {
     for (const material of finished) {
-      if (dressed(material)) continue;
+      if (dressed(material) || material.hidden) continue;
       const part = material.name.replace(/^tank_/, "").replace(/_skinned$/, "");
       const named = donors.find((d) => d.name.includes(part));
       const donor = named ?? donors.reduce((a, b) => (Object.keys(b.textures).length > Object.keys(a.textures).length ? b : a));
