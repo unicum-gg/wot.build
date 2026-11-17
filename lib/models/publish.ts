@@ -312,6 +312,10 @@ export async function publish(
         // is not dropped because this run had nothing to say about it.
         if (!model.hullPosition && held.hullPosition) model.hullPosition = held.hullPosition;
         if (!Object.keys(model.modules ?? {}).length && held.modules) model.modules = held.modules;
+        // The legs a walking vehicle stands on, likewise read from a prefab
+        // rather than from its geometry, so a run that did not hold the prefab
+        // does not take them off.
+        if (!model.copies && held.copies) model.copies = held.copies.filter((c) => model.pieces[c.piece]);
         compact(model);
       }
       files.push(["model.json", model]);

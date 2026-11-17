@@ -30,7 +30,7 @@ import {
   type Material,
   type PathIndex,
 } from "./material.js";
-import { MirrorFeature, type Piece, type VehicleModel } from "./model.js";
+import { MirrorFeature, type Piece, type PieceCopy, type VehicleModel } from "./model.js";
 import { hardpoints, place, placements, readVisual, tree, type Placement, type VisualMaterial, type VisualRenderSet } from "./visual.js";
 import { clipsFor, movedBy } from "./animation.js";
 import type { SequenceClip } from "./sequence.js";
@@ -304,6 +304,14 @@ export class VehicleBuilder {
     this.modules = modules;
   }
 
+  /** The pieces the vehicle draws more than once, where no module names them. */
+  private copies: PieceCopy[] = [];
+
+  /** Told where the vehicle's prefab stands copies of a piece. */
+  declareCopies(copies: PieceCopy[]): void {
+    this.copies = copies;
+  }
+
   /** Told what the chassis declares about its belt, laid or chained. */
   declareSpline(spline: ChassisBelt[] | null, chain: PhysicalTrack | null = null): void {
     this.spline = spline;
@@ -362,6 +370,11 @@ export class VehicleBuilder {
       features: [MirrorFeature.NormalMask],
       ...(hullPosition ? { hullPosition } : {}),
       pieces: this.pieces,
+      // Only the copies of a piece this build converted: a copy of a leg that
+      // failed to convert would send a viewer after a file that is not there.
+      ...(this.copies.some((c) => this.pieces[c.piece])
+        ? { copies: this.copies.filter((c) => this.pieces[c.piece]) }
+        : {}),
       materials,
       tracks,
       ...(wheels.length > 0 ? { wheels } : {}),

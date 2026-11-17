@@ -41,6 +41,7 @@ import {
   writeMeasured,
   type Measured,
 } from "./lib/models/convert.js";
+import { hexapodOf } from "./lib/hexapod.js";
 import { publish } from "./lib/models/publish.js";
 import { lockedModelSets, readLockedStyles } from "./lib/locked-styles.js";
 import { MODE_PACKAGE } from "./lib/modes.js";
@@ -85,6 +86,8 @@ async function drain(work: string, converted: Set<string>, scripts: VehicleScrip
       if (!settings.collisionOnly) {
         convertPieces(work, vehicle, into, settings, scripts, last);
         convertTrack(work, vehicle, into, settings);
+        const copies = hexapodOf(work, vehicle.code);
+        if (copies) into.model.declareCopies(copies);
       }
     } catch (e) {
       log(`  ! ${vehicle.nation}/${vehicle.code}: ${(e as Error).message}`);

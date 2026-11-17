@@ -7,6 +7,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DecalGeometry } from "three/addons/geometries/DecalGeometry.js";
+import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
 
 
 /** The ribbon the chassis carries is the game's cheap stand-in for a track. */
@@ -1029,7 +1030,8 @@ export async function loadVisual({ renderer, scene, root, vehicle, mounts, defin
     return mounts.hull;
   };
 
-  for (const name of pieces) {
+  /** Fetch a piece and dress it in its materials. */
+  const dressed = async (name) => {
     const piece = model.pieces[name];
     part = partOf(name);
     owner = name;
@@ -1048,6 +1050,11 @@ export async function loadVisual({ renderer, scene, root, vehicle, mounts, defin
       if (!o.geometry.getAttribute("uv1")) o.geometry.setAttribute("uv1", o.geometry.getAttribute("uv"));
       triangles += o.geometry.index.count / 3;
     });
+    return gltf;
+  };
+
+  for (const name of pieces) {
+    const gltf = await dressed(name);
     parentFor(name).add(gltf.scene);
     parts.push(gltf.scene);
     // Kept by piece, because a mark is placed on the piece the client hangs its
@@ -1055,6 +1062,21 @@ export async function loadVisual({ renderer, scene, root, vehicle, mounts, defin
     const meshes = [];
     gltf.scene.traverse((o) => o.isMesh && meshes.push(o));
     surfaces.set(name, meshes);
+  }
+
+  // The pieces no module draws, once per copy: the legs a walking vehicle
+  // stands on. Placed off the vehicle itself, like the chassis, since the
+  // copies are published in its space. A copy is a clone rather than a second
+  // download, and a skinned leg needs its skeleton cloned with it.
+  const copied = new Map();
+  for (const copy of model.copies ?? []) {
+    if (!model.pieces[copy.piece]) continue;
+    if (!copied.has(copy.piece)) copied.set(copy.piece, await dressed(copy.piece));
+    const scene = cloneSkinned(copied.get(copy.piece).scene);
+    scene.position.fromArray(copy.translation);
+    scene.quaternion.fromArray(copy.rotation);
+    mounts.scene.add(scene);
+    parts.push(scene);
   }
 
   // The real track: one link repeated along the path the client ships.

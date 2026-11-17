@@ -145,6 +145,18 @@ export enum MirrorFeature {
   NormalMask = "normal-mask",
 }
 
+/**
+ * A piece drawn more than once, where no module names it.
+ *
+ * In the mirror's space, like every other position here, and glTF-ready: a
+ * translation and a quaternion a viewer can set on a clone as they are.
+ */
+export type PieceCopy = {
+  piece: string;
+  translation: number[];
+  rotation: number[];
+};
+
 export type VehicleModel = {
   /** Everything this build packs that a viewer has to be told about. */
   features: MirrorFeature[];
@@ -161,6 +173,15 @@ export type VehicleModel = {
    */
   hullPosition?: number[];
   pieces: Record<string, Piece>;
+  /**
+   * Pieces placed by something other than a module, once per copy.
+   *
+   * Only a walking vehicle has any: the Halloween spider ships one leg and
+   * stands on seven copies of it (see `hexapod.ts`). A viewer draws each copy
+   * off the vehicle itself, the way it draws the chassis, and never the piece
+   * on its own.
+   */
+  copies?: PieceCopy[];
   materials: Material[];
   /** Absent when the client ships no path for this vehicle. */
   tracks?: Tracks;
