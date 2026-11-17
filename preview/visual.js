@@ -12,6 +12,96 @@ import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
 
 /** The ribbon the chassis carries is the game's cheap stand-in for a track. */
 const RIBBON = /^track_/;
+
+/**
+ * Slide the texture along the ribbon a chassis carries, for a vehicle with no
+ * belt to lay.
+ *
+ * A dozen tracked vehicles ship no link or no path, so the ribbon is all there
+ * is, and it stood still while the wheels turned. It cannot be deformed (each
+ * vertex is bound to one bone at full weight), but it does not need to be: the
+ * client scrolls its texture, and so does this.
+ *
+ * **How far a metre moves the texture is measured on the ribbon itself**, along
+ * its bottom run, where the belt lies flat on the ground: the UV coordinate
+ * that changes with Z there is the one running along the belt, and its slope is
+ * texture per metre. The bottom of a belt stands still on the ground while the
+ * tank moves forward, so after a distance `d` the point under Z shows what was
+ * under `Z + d`: the coordinate moves by the slope times `d`.
+ *
+ * Null when there is no ribbon to run, so a caller can tell.
+ */
+function ribbonScroller(parts) {
+  const meshes = [];
+  for (const part of parts) {
+    part.traverse((o) => {
+      if (o.isMesh && o.visible && RIBBON.test(o.name) && o.geometry.getAttribute("uv")) meshes.push(o);
+    });
+  }
+  if (meshes.length === 0) return null;
+  let floor = Infinity;
+  let top = -Infinity;
+  for (const mesh of meshes) {
+    const pos = mesh.geometry.getAttribute("position");
+    for (let i = 0; i < pos.count; i++) {
+      floor = Math.min(floor, pos.getY(i));
+      top = Math.max(top, pos.getY(i));
+    }
+  }
+  // The bottom run, as the lowest tenth of the belt's height.
+  const ground = floor + (top - floor) * 0.1;
+  // **Measured edge by edge, not fitted along the whole run.** A ribbon is
+  // textured in stretches that each start their texture over, so the
+  // coordinate is a saw along the belt and a line through all of it measures
+  // nothing. Every edge lying along the bottom run says the same thing locally,
+  // and their median is the rate.
+  const slopeOf = (mesh) => {
+    const pos = mesh.geometry.getAttribute("position");
+    const uv = mesh.geometry.getAttribute("uv");
+    const index = mesh.geometry.index;
+    if (!index) return null;
+    const slopes = [[], []];
+    for (let t = 0; t + 2 < index.count; t += 3) {
+      for (let e = 0; e < 3; e++) {
+        const i = index.getX(t + e);
+        const j = index.getX(t + ((e + 1) % 3));
+        if (pos.getY(i) > ground || pos.getY(j) > ground) continue;
+        const dz = pos.getZ(j) - pos.getZ(i);
+        if (Math.abs(dz) < 0.01) continue;
+        slopes[0].push((uv.getX(j) - uv.getX(i)) / dz);
+        slopes[1].push((uv.getY(j) - uv.getY(i)) / dz);
+      }
+    }
+    if (slopes[0].length < 8) return null;
+    const median = (list) => [...list].sort((x, y) => x - y)[list.length >> 1];
+    const rates = slopes.map(median);
+    const axis = Math.abs(rates[1]) > Math.abs(rates[0]) ? 1 : 0;
+    return rates[axis] !== 0 ? { axis, slope: rates[axis] } : null;
+  };
+  // A ribbon split into pieces may leave one with nothing on the ground, which
+  // takes the slope its side measured.
+  const measured = meshes.map((mesh) => ({ mesh, fit: slopeOf(mesh) }));
+  const sideOf = (mesh) => Math.sign(mesh.geometry.boundingBox?.getCenter(new THREE.Vector3()).x ?? 0);
+  for (const m of measured) m.mesh.geometry.computeBoundingBox();
+  const runs = [];
+  for (const { mesh, fit } of measured) {
+    const found = fit ?? measured.find((o) => o.fit && sideOf(o.mesh) === sideOf(mesh))?.fit ?? measured.find((o) => o.fit)?.fit;
+    if (!found) continue;
+    const uv = mesh.geometry.getAttribute("uv");
+    const rest = Float32Array.from({ length: uv.count }, (_, i) => (found.axis === 0 ? uv.getX(i) : uv.getY(i)));
+    runs.push({ uv, rest, ...found });
+  }
+  if (runs.length === 0) return null;
+  return (distance) => {
+    for (const run of runs) {
+      for (let i = 0; i < run.uv.count; i++) {
+        if (run.axis === 0) run.uv.setX(i, run.rest[i] + run.slope * distance);
+        else run.uv.setY(i, run.rest[i] + run.slope * distance);
+      }
+      run.uv.needsUpdate = true;
+    }
+  };
+}
 /** The road wheels the client skins the chassis to. */
 const WHEEL = /^W_[LR]\d+_BlendBone$/;
 /** `?wheels=off` holds the wheels still, which is how they are compared. */
@@ -1137,6 +1227,10 @@ export async function loadVisual({ renderer, scene, root, vehicle, mounts, defin
     });
   }
 
+  // Where no belt could be laid, the ribbon the chassis carries is what is on
+  // screen, and it slides its texture instead (see `ribbonScroller`).
+  const scrollRibbons = belts.length > 0 ? null : ribbonScroller(parts);
+
   // Lit like a hangar, and only while this view is the one on screen: the
   // armour views draw their own answers and an environment map would wash them.
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -1622,7 +1716,9 @@ export async function loadVisual({ renderer, scene, root, vehicle, mounts, defin
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     },
     /** Whether this vehicle published axles for its wheels. */
-    turns: wheels.length > 0,
+    // A ribbon that scrolls is something to run too, on the vehicles that
+    // publish no axles at all.
+    turns: wheels.length > 0 || scrollRibbons !== null,
     /** Whether the mirror has a high-definition set for this vehicle. */
     hasHd: Object.values(model.materials ?? {}).some((m) =>
       Object.values(m.textures ?? {}).some((t) => t.hd),
@@ -1652,6 +1748,7 @@ export async function loadVisual({ renderer, scene, root, vehicle, mounts, defin
      */
     roll(distance) {
       for (const belt of belts) belt.place(((distance % belt.total) + belt.total) % belt.total);
+      scrollRibbons?.(distance);
       for (const wheel of TURN_WHEELS ? wheels : []) {
         // Skinning applies `bone.matrixWorld * boneInverse` to a vertex, and at
         // rest those two cancel exactly. To turn the wheel about its axle the
