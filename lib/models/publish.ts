@@ -21,6 +21,7 @@ import { layPaths } from "../runs.js";
 import { fold } from "./catalogue.js";
 import { SKIN_FOLDER, type Catalogue } from "./sweep.js";
 import type { Measured } from "./convert.js";
+import type { CollisionPart } from "../collision.js";
 import { log, type Settings } from "./settings.js";
 import { borrowPieces, compact, graft, readManifest } from "./graft.js";
 
@@ -54,6 +55,24 @@ function mirrored(out: string): string[] {
   };
   walk(root);
   return found;
+}
+
+/** The armour shells the mirror already holds for a vehicle, read once per run. */
+const shellCache = new Map<string, Record<string, CollisionPart> | null>();
+function mirroredShells(out: string, key: string): Record<string, CollisionPart> | null {
+  if (!shellCache.has(key)) {
+    let parts: Record<string, CollisionPart> | null = null;
+    try {
+      const held = JSON.parse(fs.readFileSync(path.join(out, "vehicles", key, "collision.json"), "utf8")) as {
+        parts?: Record<string, CollisionPart>;
+      };
+      parts = held.parts ?? null;
+    } catch {
+      parts = null;
+    }
+    shellCache.set(key, parts);
+  }
+  return shellCache.get(key) ?? null;
 }
 
 export async function publish(
@@ -152,10 +171,17 @@ export async function publish(
     // Taken piece by piece from the path the client writes, never from a code's
     // prefix: the Skorpian's armour is the Skorpion's, which no prefix rule
     // would have found.
+    //
+    // **And from the mirror when this run did not build the donor**, which is
+    // the usual case rather than the edge one: a variant and the tank it was
+    // made from rarely share a package family, so a run that only moved one of
+    // them had nothing to borrow from. Havoc sits in the Halloween packages
+    // and the GSOR 1006 it was made from in tier X's; read from this run
+    // alone, it was published with a gun and no hull.
     const shells = { ...entry.collision };
     for (const [piece, from] of Object.entries(script?.shells ?? {})) {
       if (shells[piece] || from === key) continue;
-      const donor = vehicles.get(from)?.collision?.[piece];
+      const donor = vehicles.get(from)?.collision?.[piece] ?? mirroredShells(settings.out, from)?.[piece];
       if (donor) shells[piece] = donor;
     }
     if (Object.keys(shells).length > 0 || script) {

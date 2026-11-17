@@ -15,7 +15,8 @@
 // reading it costs nothing next to the geometry packages.
 import fs from "node:fs";
 import path from "node:path";
-import { decodePacked, isPacked, type PackedNode } from "./packed.js";
+import { isPacked, type PackedNode } from "./packed.js";
+import { decodeFlat } from "./modes.js";
 import { deployedFrom, noAiming } from "./aiming.js";
 import { collect, modelPath, type VehicleScript } from "./pieces.js";
 
@@ -99,7 +100,7 @@ export function readVehicleScripts(dir: string): VehicleScripts {
       const buf = fs.readFileSync(path.join(nationDir, file));
       if (!isPacked(buf)) continue;
       try {
-        const root = decodePacked(buf);
+        const root = decodeFlat(buf);
         const key = contentPath(root);
         if (!key) continue;
         const read: VehicleScript = {

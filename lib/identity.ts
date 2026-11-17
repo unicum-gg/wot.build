@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { decodePacked } from "./packed.js";
+import { modeListName, VEHICLE_MODES } from "./modes.js";
 import { child, numbers } from "./read.js";
 
 /** What a customization filter needs to know about a vehicle. */
@@ -35,10 +36,17 @@ export function readVehicleIdentity(
   code: string,
 ): VehicleIdentity | null {
   if (!fs.existsSync(dir)) return null;
+  // An event mode's vehicles are listed in the mode's own copy of the index,
+  // which the sweep keeps beside the base one (see `flattenMode`).
+  const lists = ["list.xml", ...VEHICLE_MODES.map(modeListName)];
   for (const nation of fs.readdirSync(dir)) {
-    const list = path.join(dir, nation, "list.xml");
-    if (!fs.existsSync(list)) continue;
-    const entry = child(decodePacked(fs.readFileSync(list)), code);
+    let entry: ReturnType<typeof child> = undefined;
+    for (const name of lists) {
+      const list = path.join(dir, nation, name);
+      if (!fs.existsSync(list)) continue;
+      entry = child(decodePacked(fs.readFileSync(list)), code);
+      if (entry) break;
+    }
     if (!entry) continue;
     const own = path.join(dir, nation, `${code}.xml`);
     const camouflage = fs.existsSync(own)

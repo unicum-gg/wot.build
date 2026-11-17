@@ -19,6 +19,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { unmoded } from "./modes.js";
 
 /** Which part of a node's placement a track drives. */
 export enum SequencePath {
@@ -272,7 +273,9 @@ export function readPrefabs(root: string, paths: string[], seen = new Set<string
     if (!fs.existsSync(full)) continue;
     const raw = fs.readFileSync(full);
     out.push(...readSequences(raw));
-    const nested = [...raw.toString("utf8").matchAll(/"prefab"\s*:\s*"([^"]+\.prefab)"/gi)].map((m) => m[1]);
+    // A mode's prefab names the prefabs it nests from the mode's own tree,
+    // which the sweep has laid onto the base one.
+    const nested = [...raw.toString("utf8").matchAll(/"prefab"\s*:\s*"([^"]+\.prefab)"/gi)].map((m) => unmoded(m[1]));
     out.push(...readPrefabs(root, nested, seen));
   }
   return out;

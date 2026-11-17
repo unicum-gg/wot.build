@@ -10,7 +10,8 @@
 // exported from 3ds Max in centimetres. Its nodes are the path's points, already
 // in order around the loop, each holding a four-by-four matrix whose translation
 // is all we need.
-import { decodePacked, isPacked, type PackedNode } from "./packed.js";
+import { isPacked, type PackedNode } from "./packed.js";
+import { decodeFlat } from "./modes.js";
 import { child } from "./read.js";
 
 /** Where a vehicle keeps its track path and the link laid along it. */
@@ -62,7 +63,7 @@ function apply(t: { basis: number[]; offset: number[] }, p: number[]): number[] 
  */
 export function readTrackPath(buf: Buffer): TrackPath | null {
   if (!isPacked(buf)) return null;
-  const root = decodePacked(buf);
+  const root = decodeFlat(buf);
   const scene = child(root, "library_visual_scenes")?.children.find((c) => c.name === "visual_scene");
   if (!scene) return null;
 

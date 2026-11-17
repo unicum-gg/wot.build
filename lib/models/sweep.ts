@@ -10,6 +10,7 @@ import { rebuildPackage } from "../patched.js";
 import { CUSTOMIZATION_GLOBS, VEHICLE_SCRIPTS_GLOB } from "../script.js";
 import { TRACK_GLOB } from "../track.js";
 import { VehicleBuilder } from "../vehicle.js";
+import { flattenMode, modeOf } from "../modes.js";
 import type { CollisionPart } from "../collision.js";
 import { SkinScope, type Settings } from "./settings.js";
 
@@ -192,6 +193,14 @@ export async function sweep(
    * tier 9 was published with the geometry it had months earlier.
    */
   deltas: readonly string[] = [],
+  /**
+   * Take the vehicle scripts and nothing else.
+   *
+   * For the event modes' packages, whose scripts have to be read before any
+   * geometry exactly as `scripts.pkg`'s do, on every run, while their geometry
+   * is only swept when the package moved. See `VEHICLE_MODES`.
+   */
+  scriptsOnly = false,
 ): Promise<void> {
   const pkgDir = path.join(archive.dir, "pkg");
   fs.rmSync(pkgDir, { recursive: true, force: true });
@@ -200,7 +209,9 @@ export async function sweep(
   // what is inside: a package called `particles` holds a vehicle's hull. Asking
   // 7z for a few extra patterns costs nothing next to reading the block, and it
   // is what makes the sweep depend on paths alone.
-  const globs = settings.collisionOnly
+  const base = scriptsOnly
+    ? [VEHICLE_SCRIPTS_GLOB]
+    : settings.collisionOnly
     ? [COLLISION_GLOB]
     : [
         COLLISION_GLOB,
@@ -212,6 +223,13 @@ export async function sweep(
         ...DECAL_GLOBS,
         ...skinGlobs(settings, skins),
       ];
+  // **An event mode's package is rooted at the mode**, `halloween/vehicles/...`,
+  // so the same patterns are asked for under it as well as at the root, where
+  // a mode still ships the odd base vehicle it reuses (Story Mode carries a
+  // Saladin there). What comes out under the mode is then laid onto the base
+  // tree, which is where every reader after this one looks.
+  const mode = modeOf(block.name);
+  const globs = mode ? [...base, ...base.map((g) => `${mode}/${g}`)] : base;
   // **`-ssc-` because the client does not spell its own folders consistently.**
   // 7z matches a pattern case sensitively on every platform but Windows, and the
   // IS-4 keeps its belt in `Track/` where every other vehicle keeps it in
@@ -222,6 +240,7 @@ export async function sweep(
   // eleven vehicles' albedo textures.
   execFileSync("7z", ["x", pkg, "-ssc-", ...globs.map((g) => `-i!${g}`), `-o${work}`, "-y"], { stdio: "ignore" });
   fs.rmSync(pkgDir, { recursive: true, force: true });
+  if (mode) flattenMode(work, mode);
 }
 
 /**

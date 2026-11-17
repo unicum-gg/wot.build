@@ -43,6 +43,7 @@ import {
 } from "./lib/models/convert.js";
 import { publish } from "./lib/models/publish.js";
 import { lockedModelSets, readLockedStyles } from "./lib/locked-styles.js";
+import { MODE_PACKAGE } from "./lib/modes.js";
 import { demand, family, movedFamilies, readFingerprints, writeFingerprints, type Fingerprints } from "./lib/models/fingerprint.js";
 import { log, readSettings, SkinScope } from "./lib/models/settings.js";
 import {
@@ -108,6 +109,15 @@ async function drain(work: string, converted: Set<string>, scripts: VehicleScrip
  * against its own archive and left in `opened` for the same cleanup as the
  * rest; the part is walked again in the normal order afterwards, where the
  * package is a no-op because its files are already on disk.
+ *
+ * **The event modes' scripts come with it, on every run.** They sit in the
+ * same part, inside each mode's own package, and they are as much the
+ * vehicle list as `scripts.pkg` is: the index is rebuilt from the scripts on
+ * every run, so a run that skipped an unchanged Halloween package without
+ * reading its scripts would drop Havoc from `vehicles.json` while its model
+ * sat in the mirror. Only the scripts are taken here; the package's geometry is
+ * swept in the normal order, and only when it moved. About 2.8 GB of blocks
+ * across the three packs, which is the price of the list being whole.
  */
 async function sweepScripts(
   client: Awaited<ReturnType<typeof resolveClient>>,
@@ -121,12 +131,18 @@ async function sweepScripts(
   const [full, ...patches] = chain;
   const archive = await SparseArchive.open(dir, full.volumes);
   opened.push(archive);
-  const drained = await drainPatches(patches, dir, (name) => SCRIPT_PACKAGE.test(name), log);
-  for (const [name, block] of packages(archive, settings)) {
-    if (!SCRIPT_PACKAGE.test(name)) continue;
-    await sweep(archive, block, work, settings, new Set(), drained.deltas.get(name) ?? []);
+  const scripted = (name: string) => SCRIPT_PACKAGE.test(name) || MODE_PACKAGE.test(name);
+  const drained = await drainPatches(patches, dir, scripted, log);
+  // The base scripts first, so a mode's copy of a file the base also ships
+  // never takes its place.
+  const ordered = [...packages(archive, settings)]
+    .filter(([name]) => scripted(name))
+    .sort(([a], [b]) => Number(MODE_PACKAGE.test(a)) - Number(MODE_PACKAGE.test(b)) || a.localeCompare(b));
+  for (const [name, block] of ordered) {
+    const mode = MODE_PACKAGE.test(name);
+    await sweep(archive, block, work, settings, new Set(), drained.deltas.get(name) ?? [], mode);
     await archive.reset();
-    return;
+    if (mode) log(`  ${path.basename(name)}: event scripts read`);
   }
 }
 

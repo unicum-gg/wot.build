@@ -12,7 +12,8 @@
 //
 // Geometry arrives already posed in the vehicle's own space, including the
 // skinned chassis, so nothing has to be transformed to draw a vehicle at rest.
-import { decodePacked, type PackedNode } from "./packed.js";
+import type { PackedNode } from "./packed.js";
+import { decodeFlat } from "./modes.js";
 import { child, children } from "./read.js";
 import { compose, IDENTITY, type Placement } from "./placement.js";
 
@@ -153,7 +154,7 @@ function readRenderSet(node: PackedNode): VisualRenderSet | null {
 }
 
 export function readVisual(buf: Buffer): Visual {
-  const root = decodePacked(buf);
+  const root = decodeFlat(buf);
   const box = child(root, "boundingBox");
   return {
     root: child(root, "node") ? readNode(child(root, "node")!) : null,

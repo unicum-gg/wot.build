@@ -21,7 +21,7 @@ import { SKIN_FOLDER, type Accumulated, type Vehicle } from "./sweep.js";
 import { readPrefabs } from "../sequence.js";
 import type { VehicleScripts } from "../script.js";
 import { trackSegment } from "../model.js";
-import { decodePacked } from "../packed.js";
+import { decodeFlat } from "../modes.js";
 import { child, text } from "../read.js";
 
 /**
@@ -203,7 +203,7 @@ function linkVisual(
   if (!fs.existsSync(descriptor)) return null;
   let named: string | null = null;
   try {
-    named = text(child(decodePacked(fs.readFileSync(descriptor)), "nodelessVisual")) || null;
+    named = text(child(decodeFlat(fs.readFileSync(descriptor)), "nodelessVisual")) || null;
   } catch {
     return null;
   }
