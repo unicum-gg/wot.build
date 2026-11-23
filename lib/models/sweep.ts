@@ -11,6 +11,7 @@ import { CUSTOMIZATION_GLOBS, VEHICLE_SCRIPTS_GLOB } from "../script.js";
 import { TRACK_GLOB } from "../track.js";
 import { VehicleBuilder } from "../vehicle.js";
 import { flattenMode, modeOf } from "../modes.js";
+import { readVisual } from "../visual.js";
 import type { CollisionPart } from "../collision.js";
 import { SkinScope, type Settings } from "./settings.js";
 
@@ -77,6 +78,9 @@ const PREFAB_GLOBS = [
 ];
 const VISUAL_GLOBS = ["vehicles/*/*/normal/lod0/*", "vehicles/*/*/*.dds", TRACK_GLOB];
 const SHARED_GLOBS = ["vehicles/*/*/*.dds"];
+// An event vehicle's materials, read ahead of the geometry for the 3D styles
+// they paint with (see `skinSetsReferenced`).
+const MODE_VISUAL_GLOB = "vehicles/*/*/normal/lod0/*.visual_processed";
 
 // A vehicle's alternative skins, one folder deeper, each a full set of pieces
 // with textures of its own. 237 vehicles declare 330 of them between them, so
@@ -194,11 +198,12 @@ export async function sweep(
    */
   deltas: readonly string[] = [],
   /**
-   * Take the vehicle scripts and nothing else.
+   * Take the vehicle scripts and the visuals, and nothing else.
    *
    * For the event modes' packages, whose scripts have to be read before any
    * geometry exactly as `scripts.pkg`'s do, on every run, while their geometry
-   * is only swept when the package moved. See `VEHICLE_MODES`.
+   * is only swept when the package moved. See `VEHICLE_MODES`. The visuals come
+   * along for `skinSetsReferenced`, which removes them once read.
    */
   scriptsOnly = false,
 ): Promise<void> {
@@ -210,7 +215,7 @@ export async function sweep(
   // 7z for a few extra patterns costs nothing next to reading the block, and it
   // is what makes the sweep depend on paths alone.
   const base = scriptsOnly
-    ? [VEHICLE_SCRIPTS_GLOB]
+    ? [VEHICLE_SCRIPTS_GLOB, MODE_VISUAL_GLOB]
     : settings.collisionOnly
     ? [COLLISION_GLOB]
     : [
@@ -241,6 +246,48 @@ export async function sweep(
   execFileSync("7z", ["x", pkg, "-ssc-", ...globs.map((g) => `-i!${g}`), `-o${work}`, "-y"], { stdio: "ignore" });
   fs.rmSync(pkgDir, { recursive: true, force: true });
   if (mode) flattenMode(work, mode);
+}
+
+/**
+ * The 3D styles the visuals on disk paint with, which are then removed.
+ *
+ * **An event vehicle can wear a base vehicle's style without being dressed in
+ * it.** The Halloween E 77 bot has geometry of its own and paints every piece
+ * with `G171_E77/_skins/G171_E77_HW26_3Dst/...`, a style the base client sells
+ * for the E 77 and ships in the E 77's own tier package. Nothing locks that style
+ * onto a vehicle, so the sweep never took it, and the bot was published with the
+ * one texture it could find, its track's, borrowed onto the hull, the turret
+ * and the gun. Read from the bot's materials, the set is pulled like a locked
+ * one, and the textures land where the material already looks for them.
+ *
+ * Meant for the scripts pass, which runs before any geometry: the visuals it
+ * reads are deleted here, so the sweep after it starts from the tree it always
+ * did and a vehicle whose package is skipped is not left half extracted.
+ */
+export function skinSetsReferenced(work: string): Set<string> {
+  const sets = new Set<string>();
+  const root = path.join(work, "vehicles");
+  if (!fs.existsSync(root)) return sets;
+  for (const nation of fs.readdirSync(root)) {
+    const nationDir = path.join(root, nation);
+    if (!fs.statSync(nationDir).isDirectory()) continue;
+    for (const code of fs.readdirSync(nationDir)) {
+      const lod = path.join(nationDir, code, "normal", "lod0");
+      if (!fs.existsSync(lod)) continue;
+      for (const file of fs.readdirSync(lod)) {
+        if (!file.endsWith(".visual_processed")) continue;
+        const visual = readVisual(fs.readFileSync(path.join(lod, file)));
+        for (const set of visual.renderSets)
+          for (const material of set.materials)
+            for (const texture of Object.values(material.textures)) {
+              const style = texture.match(new RegExp(`/${SKIN_FOLDER}/([^/]+)/`, "i"));
+              if (style) sets.add(style[1]);
+            }
+      }
+    }
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+  return sets;
 }
 
 /**

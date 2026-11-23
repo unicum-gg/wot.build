@@ -56,6 +56,7 @@ import {
   HD_SHARED_PACKAGE,
   SCRIPT_PACKAGE,
   SHARED_PACKAGE,
+  skinSetsReferenced,
   type Catalogue,
 } from "./lib/models/sweep.js";
 
@@ -126,10 +127,10 @@ async function sweepScripts(
   client: Awaited<ReturnType<typeof resolveClient>>,
   opened: SparseArchive[],
   work: string,
-): Promise<void> {
-  if (!client) return;
+): Promise<Set<string>> {
+  if (!client) return new Set();
   const chain = client.getChain("client");
-  if (chain.length === 0) return;
+  if (chain.length === 0) return new Set();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wotmodels-"));
   const [full, ...patches] = chain;
   const archive = await SparseArchive.open(dir, full.volumes);
@@ -147,6 +148,7 @@ async function sweepScripts(
     await archive.reset();
     if (mode) log(`  ${path.basename(name)}: event scripts read`);
   }
+  return skinSetsReferenced(work);
 }
 
 async function main(): Promise<void> {
@@ -191,7 +193,7 @@ async function main(): Promise<void> {
     // converted before them would be built without its mechanism and never
     // looked at again. `scripts.pkg` is 23 MB, so reading it up front costs
     // nothing next to the tiers it now precedes.
-    await sweepScripts(client, opened, work);
+    const worn = await sweepScripts(client, opened, work);
     const scripts = readVehicleScripts(path.join(work, "scripts", "item_defs", "vehicles"));
     // **Which 3D styles this run has to carry, decided from the client rather
     // than from a list.** A style bolted onto a vehicle is that vehicle's only
@@ -200,11 +202,13 @@ async function main(): Promise<void> {
     // just put on disk, and needed here because every sweep after this one is
     // where those files would be taken from.
     const locked = readLockedStyles(path.join(work, "scripts", "item_defs", "customization"));
-    const skins = settings.skins === SkinScope.All ? new Set<string>() : lockedModelSets(locked);
+    // Plus the ones an event vehicle paints its own geometry with, which no
+    // lock names (see `skinSetsReferenced`).
+    const skins = settings.skins === SkinScope.All ? new Set<string>() : new Set([...lockedModelSets(locked), ...worn]);
     log(
       settings.skins === SkinScope.All
         ? `${locked.length} styles locked onto a vehicle, pulling every 3D style`
-        : `${locked.length} styles locked onto a vehicle, ${skins.size} model sets to pull`,
+        : `${locked.length} styles locked onto a vehicle, ${worn.size} worn by an event vehicle, ${skins.size} model sets to pull`,
     );
     for (const part of settings.skipHd ? ["sdcontent", "client"] : ["sdcontent", "hdcontent", "client"]) {
       const chain = client.getChain(part);
