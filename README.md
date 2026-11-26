@@ -53,6 +53,37 @@ different.
   those, since 237 vehicles declare 330 between them and the rest are
   alternatives a player chooses. `--skins` pulls the lot.
 
+- `generate-archive.ts`: the past, which no live mirror can hold since the
+  update CDN only serves today's build. It rebuilds every version before
+  `wot.src` began (1.13) from the full EU clients preserved on the Internet
+  Archive (0.6.2 to 0.9.7) and a community mirror of the decompiled client
+  (0.9.12 to 1.12.1), then walks that timeline into today's to find every map
+  the game no longer ships, and cuts each one's minimap from the last archived
+  build carrying its package: the CDN's own `.wgpkg` installs uploaded since
+  1.19.1 first, read sparse like the live ones, the old clients after. Those
+  are single **solid** 7z files, so they cannot be ranged into; `lib/py/
+  stream_7z.py` decodes the one LZMA2 stream as it arrives over two dozen
+  parallel ranges and stops at the last entry wanted, which is why a version's
+  definitions cost a few hundred megabytes rather than ten gigabytes.
+  `publish-archive.ts` pushes the result as the `ARCHIVE` branch of `wot.src`
+  (one commit per version, dated when it shipped, with a live branch's commit
+  subjects, so a history backfill reads it unchanged) and of `wot.maps` (the
+  retired maps catalogue: minimaps, last definitions and `index.json`). Run by
+  hand: the past does not change. It also writes the maps' visual history
+  (`history/`, `--visuals-only` to rebuild it alone) since 1.19.1: for every
+  update whose patch rewrote a map package past a repack, where the ground
+  moved (`<version>-relief.webp`, from the terrain cells' heights), what was
+  built or pulled down (`<version>-objects.webp`, from `space.bin`), the other
+  parts touched (sky, sound, models...), and the minimap before and after where
+  it was redrawn. Each package read is reduced to a cached snapshot under
+  `.cache/<id>/<version>.snapshot.json.gz`, so retuning a threshold costs no
+  download. `--legacy-minimaps` adds the minimaps of the archived full clients (0.6.2
+  to 0.9.7, plus the one 1.15.0 install that survives;
+  `history/legacy-minimaps.json`, each image with the last version it holds
+  for), one image per version that redrew one, so the history's oldest updates are drawn on the map they were played
+  on rather than today's. It streams each client whole, a few hours for all of
+  them, cached per client under `.legacy-cache` so a stopped run resumes.
+
 The sources mirror does the opposite of the assets one and **empties its
 worktree first**: a script the client dropped must stop being published, because
 that tree describes what the game is.

@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "models": "tsx generate-models.ts",
     "warm": "tsx warm-models.ts",
-    "locales": "tsx generate-locales.ts"
+    "locales": "tsx generate-locales.ts",
+    "archive": "tsx generate-archive.ts",
+    "archive:publish": "tsx publish-archive.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
