@@ -58,6 +58,41 @@ export async function archivedInstalls(): Promise<ArchivedInstall[]> {
     .sort((a, b) => compareVersions(b.version, a.version));
 }
 
+/** `wot_1.24.1.23011_1.24.1.22994_sdcontent.wgpkg`: the patch from one build to
+ * the next. */
+const PATCH = /^wot_(\d+)\.(\d+)\.(\d+)\.\d+_\d+\.\d+\.\d+\.\d+_([a-z]+)\.wgpkg$/;
+
+/**
+ * Every patch uploaded beside the installs, newest version first.
+ *
+ * They matter for one thing the installs miss: the event maps. Wargaming adds
+ * an event's arena in a patch partway through a version and pulls it before
+ * the next, so it is in no full install at all, only in the patch that
+ * introduced it, stored whole there (`281_cosmic.pkg` in 1.24.1's 22994 to
+ * 23011, Paperland in 1.27.0's). A package the patch only changed is stored as
+ * a diff (`.rdiff`, `.xdiff`) and is no use on its own.
+ */
+export async function archivedPatches(): Promise<{ version: string; part: string; volume: Volume }[]> {
+  const out: { version: string; part: string; volume: Volume }[] = [];
+  for (const item of ITEMS) {
+    const meta = JSON.parse(await fetchText(`https://archive.org/metadata/${item}/files`)) as {
+      result: { name: string; size?: string }[];
+    };
+    for (const file of meta.result) {
+      const [folder, name] = file.name.split("/");
+      if (!name || folder === "locale") continue;
+      const m = PATCH.exec(name);
+      if (!m) continue;
+      out.push({
+        version: `${Number(m[1])}.${Number(m[2])}.${Number(m[3])}`,
+        part: m[4],
+        volume: { url: `https://archive.org/download/${item}/${folder}/${name}`, size: Number(file.size ?? 0) },
+      });
+    }
+  }
+  return out.sort((a, b) => compareVersions(b.version, a.version));
+}
+
 /** The English locale package of each archived version, newest first. */
 export async function archivedEnglishLocales(): Promise<{ version: string; volume: Volume }[]> {
   const out = new Map<string, { folder: string; volume: Volume }>();

@@ -47,7 +47,7 @@ import { retiredArenas, timeline, writeCatalog } from "./lib/archive-catalog.js"
 import { buildLegacyMinimaps } from "./lib/legacy-minimaps.js";
 import { buildVisualHistory } from "./lib/minimap-history.js";
 import { SparseArchive } from "./lib/archive.js";
-import { archivedInstalls, MAP_PARTS } from "./lib/archived-installs.js";
+import { archivedInstalls, archivedPatches, MAP_PARTS } from "./lib/archived-installs.js";
 import { decodeDDS } from "./lib/dds.js";
 import { decompiledArenaDefs, decompiledVersions } from "./lib/decompiled-mirror.js";
 import { decodePacked, isPacked } from "./lib/packed.js";
@@ -279,9 +279,11 @@ async function liveMinimaps(branches = ["WG", "WG_CT"]): Promise<Set<string>> {
  *
  * Two archives, newest first within each, since an arena's minimap is taken
  * from the last build that shipped its package, which is the map as it was when
- * it left: the update CDN's own installs preserved since 1.19.1, then the full
- * clients of 0.6.2 to 0.9.7. What neither carries (the maps that lived only
- * between 0.9.8 and 1.18) is reported and keeps no image.
+ * it left: the update CDN's own installs preserved since 1.19.1, then the
+ * patches uploaded beside them (where an event map lives, added partway through
+ * a version and pulled before the next), then the full clients of 0.6.2 to
+ * 0.9.7. What none carries (the maps that lived only between 0.9.8 and 1.18)
+ * is reported and keeps no image.
  */
 async function buildMinimaps(retired: Iterable<string>, live: ReadonlySet<string>, out: string) {
   const mapsDir = path.join(out, "maps");
@@ -319,6 +321,35 @@ async function buildMinimaps(retired: Iterable<string>, live: ReadonlySet<string
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    }
+  }
+
+  // The event maps live in no full install, only in the patch that added them.
+  for (const patch of await archivedPatches()) {
+    if (missing.size === 0) break;
+    if (!MAP_PARTS.includes(patch.part)) continue;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "patch-"));
+    try {
+      const archive = await SparseArchive.open(dir, [patch.volume]);
+      const blocks = archive.index();
+      for (const id of [...missing]) {
+        const block = blocks.get(`res/packages/${id}.pkg`);
+        if (!block) continue;
+        log(`${patch.version} patch ${patch.part}: ${id}`);
+        const pkg = await archive.extract(block, path.join(dir, "pkg"));
+        try {
+          await minimapFromPackage(pkg, id, path.join(mapsDir, `${id}.webp`));
+          missing.delete(id);
+        } catch (error) {
+          log(`  ~ ${id}: ${(error as Error).message}`);
+        }
+        fs.rmSync(path.join(dir, "pkg"), { recursive: true, force: true });
+        await archive.reset();
+      }
+    } catch (error) {
+      log(`  ~ ${patch.version} patch ${patch.part}: ${(error as Error).message}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   }
 

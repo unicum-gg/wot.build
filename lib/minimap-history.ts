@@ -37,7 +37,7 @@ const RANGE = 4 << 20;
 const PARALLEL = 16;
 
 /** `archive.extract`, with the block fetched as parallel ranges first. */
-async function extractBlock(archive: SparseArchive, block: Block, destination: string): Promise<string> {
+export async function extractBlock(archive: SparseArchive, block: Block, destination: string): Promise<string> {
   const ranges: { start: number; length: number }[] = [];
   for (let at = 0; at < block.packed; at += RANGE) {
     ranges.push({ start: block.offset + at, length: Math.min(RANGE, block.packed - at) });
