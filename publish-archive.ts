@@ -10,7 +10,10 @@
 // `wot.maps` gets the catalogue of retired maps as a single commit: the
 // minimaps, the last definitions and `index.json`. It describes the past as it
 // is known today rather than a sequence of versions, so it has no history to
-// keep and is rewritten whole.
+// keep and is rewritten whole. The history's images go to eight branches of
+// their own (`ARCHIVE_HISTORY_<n>`, by arena id): jsDelivr serves nothing from a
+// branch past 50 MB, and the history alone is twice that. The site picks the
+// branch with the same function (`archiveHistoryShard` in its shared package).
 //
 // Both branches are orphans and are rebuilt from scratch on every run, then
 // force-pushed: they hold nothing but what this produces.
@@ -53,10 +56,20 @@ function git(cwd: string, gitArgs: string[], env: Record<string, string> = {}): 
   });
 }
 
+const HISTORY_SHARDS = 8;
+
+/** Which `ARCHIVE_HISTORY_<n>` branch holds a map's history images. Must stay
+ * the site's `archiveHistoryShard`, or every image 404s. */
+function historyShard(arenaId: string): number {
+  let sum = 0;
+  for (let i = 0; i < arenaId.length; i++) sum += arenaId.charCodeAt(i);
+  return sum % HISTORY_SHARDS;
+}
+
 /** A fresh orphan branch in an empty clone-less repository pointed at `remote`. */
-function orphanRepo(remote: string): string {
+function orphanRepo(remote: string, branch = BRANCH): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "archive-publish-"));
-  git(dir, ["init", "-q", "-b", BRANCH]);
+  git(dir, ["init", "-q", "-b", branch]);
   git(dir, ["remote", "add", "origin", remote]);
   git(dir, ["config", "user.name", "wot.build"]);
   git(dir, ["config", "user.email", "actions@users.noreply.github.com"]);
@@ -128,9 +141,15 @@ function publishVersions() {
 
 function publishCatalog() {
   const repo = orphanRepo(MAPS_REPO);
-  for (const entry of ["maps", "arena_defs", "index.json", "history"]) {
+  for (const entry of ["maps", "arena_defs", "index.json"]) {
     const from = path.join(CATALOG, entry);
     if (fs.existsSync(from)) fs.cpSync(from, path.join(repo, entry), { recursive: true });
+  }
+  // The history's indexes stay here, read raw by the site; its images do not.
+  const history = path.join(CATALOG, "history");
+  fs.mkdirSync(path.join(repo, "history"), { recursive: true });
+  for (const entry of fs.readdirSync(history, { withFileTypes: true })) {
+    if (entry.isFile()) fs.copyFileSync(path.join(history, entry.name), path.join(repo, "history", entry.name));
   }
   fs.writeFileSync(
     path.join(repo, "README.md"),
@@ -142,9 +161,10 @@ function publishCatalog() {
       "(the last definition) and `index.json` (its name and the versions it was in).",
       "",
       "`history/` is what each update did to every map's look: `history/index.json`",
-      "(the terrain, objects and minimap each rework touched, with its images), and",
+      "(the terrain, objects and minimap each rework touched), and",
       "`history/legacy-minimaps.json`, the minimap of every map in the clients of 0.6.2",
-      "to 0.9.7, one image per version that redrew it.",
+      "to 0.9.7, one image per version that redrew it. The images themselves are on the",
+      "`ARCHIVE_HISTORY_0` to `_7` branches, by arena id, at the same paths.",
       "",
       "Rebuilt by `unicum-gg/wot.build`'s `generate-archive` from the full EU clients",
       "preserved on the Internet Archive, a decompiled mirror of the versions after",
@@ -158,16 +178,38 @@ function publishCatalog() {
   return repo;
 }
 
-function push(repo: string) {
-  git(repo, ["push", "--force", "origin", BRANCH]);
-  log(`pushed ${BRANCH} from ${repo}`);
+function publishHistoryShards(): { repo: string; branch: string }[] {
+  const history = path.join(CATALOG, "history");
+  const ids = fs
+    .readdirSync(history, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+  return Array.from({ length: HISTORY_SHARDS }, (_, shard) => {
+    const branch = `${BRANCH}_HISTORY_${shard}`;
+    const repo = orphanRepo(MAPS_REPO, branch);
+    for (const id of ids.filter((id) => historyShard(id) === shard)) {
+      fs.cpSync(path.join(history, id), path.join(repo, "history", id), { recursive: true });
+    }
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "--allow-empty", "-m", `map history images, shard ${shard}`]);
+    log(`wot.maps ${branch} committed`);
+    return { repo, branch };
+  });
+}
+
+function push(repo: string, branch = BRANCH) {
+  git(repo, ["push", "--force", "origin", branch]);
+  log(`pushed ${branch} from ${repo}`);
 }
 
 const src = publishVersions();
 const maps = publishCatalog();
+const shards = publishHistoryShards();
 if (PUSH) {
   push(src);
+  // The images first, so the catalogue never names one that is not there yet.
+  for (const { repo, branch } of shards) push(repo, branch);
   push(maps);
 } else {
-  log(`dry run: review ${src} and ${maps}, then rerun with --push`);
+  log(`dry run: review ${src}, ${maps} and the history shards, then rerun with --push`);
 }

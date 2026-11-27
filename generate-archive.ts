@@ -432,6 +432,12 @@ async function main() {
   await buildMinimaps(retired.keys(), await liveMinimaps(), MINIMAPS);
   await writeCatalog(full, retired, MINIMAPS, await liveMinimaps(["WG"]), log, (mo) => poOf(mo));
   await buildVisualHistory(new Set(full.flatMap((v) => v.arenas)), MINIMAPS, log);
+  // The visual history rewrites `history/` whole, which takes the old clients'
+  // minimaps and the 1.0 rework with it (a republish once dropped all of them).
+  // Put them back from the cache they were measured into: no client is read
+  // again unless its marker is missing.
+  const legacyCache = path.join(MINIMAPS, ".legacy-cache");
+  if (fs.existsSync(legacyCache)) await buildLegacyMinimaps(MINIMAPS, legacyCache, SIZE, log);
 }
 
 main().catch((error) => {
